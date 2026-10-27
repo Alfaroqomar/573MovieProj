@@ -1,0 +1,90 @@
+@import "@fontsource-variable/archivo/wdth.css";
+@import "tailwindcss";
+
+/*
+  MovieMatch tokens.
+  Charcoal base, deep burgundy accent, warm off-white text.
+  One family (Archivo); the display face is the same family stretched wide,
+  like film title cards. Model colours are used only to identify models.
+*/
+@theme {
+  --font-sans: "Archivo Variable", ui-sans-serif, system-ui, sans-serif;
+
+  --color-ink: #1f1c1d;          /* page background, charcoal */
+  --color-panel: #282425;        /* cards and panels */
+  --color-raised: #322d2f;       /* inputs, hover */
+  --color-line: #463f41;         /* borders */
+  --color-paper: #f3ece2;        /* primary text, warm off-white */
+  --color-muted: #bdb2a8;        /* secondary text */
+  --color-faint: #958a82;        /* tertiary text (large or non-essential only) */
+  --color-wine: #7a1f3d;         /* burgundy accent fill */
+  --color-wine-deep: #5c1530;
+  --color-rose: #e48aa3;         /* burgundy tint for text/focus on charcoal */
+
+  --color-model-popularity: #9fb3c8;
+  --color-model-knn: #a9c08f;
+  --color-model-als: #d8b878;
+  --color-model-llm: #e48aa3;
+
+  --color-ok: #9cc79a;
+  --color-warn: #e2c07d;
+  --color-bad: #ef9a8f;
+
+  --radius-card: 14px;
+  --radius-control: 10px;
+  --shadow-card: 0 1px 0 rgb(255 255 255 / 0.03) inset, 0 10px 24px -14px rgb(0 0 0 / 0.7);
+}
+
+@layer base {
+  html {
+    background: var(--color-ink);
+    color: var(--color-paper);
+    font-family: var(--font-sans);
+    font-feature-settings: "tnum" 0;
+    -webkit-font-smoothing: antialiased;
+    color-scheme: dark;
+  }
+  body {
+    min-height: 100dvh;
+    line-height: 1.55;
+  }
+  ::selection {
+    background: var(--color-wine);
+    color: var(--color-paper);
+  }
+  :focus-visible {
+    outline: 2px solid var(--color-rose);
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@utility display {
+  font-stretch: 125%;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  line-height: 1.02;
+}
+
+@utility display-soft {
+  font-stretch: 112%;
+  font-weight: 650;
+  letter-spacing: -0.005em;
+  line-height: 1.15;
+}
+
+@utility num {
+  font-variant-numeric: tabular-nums;
+}
+
+@utility measure {
+  max-width: 68ch;
+}
