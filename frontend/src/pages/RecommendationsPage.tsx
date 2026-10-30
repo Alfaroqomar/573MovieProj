@@ -267,7 +267,11 @@ function ResultHeader({ result }: { result: RecommendationResponse }) {
     <div className="space-y-3">
       <p className="num text-sm text-muted">
         {info.label}
-        {result.candidateCount ? `, ${result.candidateCount} ALS candidates` : ""}, answered in {fmtMs(result.elapsedMs)}
+        {result.candidateCount
+          ? result.mode === "stage1"
+            ? `, ${result.candidateCount}-movie shortlist (${result.candidateSources?.both ?? 0} picked by both models)`
+            : `, ${result.candidateCount} ALS candidates`
+          : ""}, answered in {fmtMs(result.elapsedMs)}
         {result.llm ? `, ${result.llm.attempts} LLM ${result.llm.attempts === 1 ? "call" : "calls"}` : ""}
       </p>
       {result.usedFallback ? (

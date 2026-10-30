@@ -6,7 +6,16 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-Mode = Literal["popularity", "item_knn", "als", "als_llm"]
+Mode = Literal[
+    "popularity",
+    "popularity_weighted",
+    "item_knn",
+    "als",
+    "als_explicit",
+    "stage1",
+    "neumf",
+    "als_llm",
+]
 
 
 class _Model(BaseModel):
@@ -53,6 +62,11 @@ class RecommendationOut(BaseModel):
     strongestKnnSimilarity: float | None = None
     knnEvidence: list[KnnEvidenceOut] | None = None
     llmRelevanceScore: float | None = None
+    predictedRating: float | None = None
+    mergedScore: float | None = None
+    knnRank: int | None = None
+    candidateSource: Literal["both", "als", "knn", "als_top_up"] | None = None
+    neumfScore: float | None = None
     popularityScore: float | None = None
     ratingCount: int | None = None
     meanRating: float | None = None
@@ -78,6 +92,8 @@ class RecommendationResponse(BaseModel):
     userId: int
     topN: int
     candidateCount: int | None = None
+    candidateSources: dict[str, int] | None = None
+    knnScoring: str | None = None
     recommendations: list[RecommendationOut]
     usedFallback: bool
     fallbackLabel: str | None = None

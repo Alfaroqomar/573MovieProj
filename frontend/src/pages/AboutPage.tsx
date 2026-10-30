@@ -42,8 +42,14 @@ export function AboutPage() {
         <div className="measure space-y-3">
           <h2 id="architecture" className="display-soft text-2xl text-paper">System architecture</h2>
           <ol className="list-decimal space-y-1.5 pl-5 text-muted marker:text-faint">
-            <li>MovieLens 32M is preprocessed into a chronological per-user split (80% train, 10% validation, 10% test).</li>
-            <li>ALS produces the top 50 unseen candidate movies for the selected user.</li>
+            <li>
+              MovieLens 32M is split by date, as in the proposal: ratings before 2020 train the models, 2020–21 is for
+              tuning (validation), and 2022–23 is for the final test.
+            </li>
+            <li>
+              Stage 1: ALS and Item-KNN each rank every unseen movie; their top 30s are merged into a 50-movie
+              shortlist. (The LLM mode currently reranks ALS's top 50.)
+            </li>
             <li>Item-KNN attaches similarity evidence linking each candidate to movies the user rated highly.</li>
             <li>Candidate genres, tags, scores, and the user's top-rated movies are collected.</li>
             <li>The LLM interprets the request and reranks only the supplied candidates.</li>
@@ -59,23 +65,38 @@ export function AboutPage() {
 
       <Section id="models" title="The models">
         <p>
-          <strong>Popularity.</strong> A Bayesian weighted rating on the training split, WR = v/(v+m)·R + m/(v+m)·C,
-          where v is a movie's number of ratings, R its mean rating, C the mean of all ratings, and m the 90th percentile
-          of rating counts. Movies with at least m ratings are ranked first. It ignores personal taste except to skip
-          movies the user has already rated, which makes it a useful floor for the other models.
+          All models learn only from ratings before the evaluated period and never recommend a movie the user has
+          already rated.
+        </p>
+        <p>
+          <strong>Popularity.</strong> The proposal's baseline: the most-rated movies, the same list for everyone. A
+          second version, <strong>Popularity (weighted)</strong>, ranks by a Bayesian weighted rating, WR = v/(v+m)·R +
+          m/(v+m)·C, so movies that are both widely and well rated come first.
         </p>
         <p>
           <strong>Item-KNN.</strong> Cosine similarity between movies' rating vectors, keeping each movie's 50 nearest
-          neighbours in a sparse matrix (never a dense 87,585 × 87,585 one). A movie's score is the sum of its
-          similarities to the user's highly rated movies (4.0 or higher), weighted by those ratings. The strongest
-          similarities are shown as evidence.
+          neighbours in a sparse matrix (never a dense 87,585 × 87,585 one). The app scores a movie by the sum of its
+          similarities to the movies the user rated 4.0 or higher, weighted by those ratings. The proposal's formula, a
+          similarity-weighted average of the user's ratings, is also evaluated. On the validation period it scored far
+          lower, because averages favour obscure movies with one or two strong neighbours, so the sum is the default.
         </p>
         <p>
-          <strong>ALS.</strong> Matrix factorization trained on the training split. Ratings are treated as implicit
-          feedback: each rated movie is a positive interaction with confidence 1 + α·rating, so higher ratings count more.
-          When serving, the user's vector is re-solved from all of their ratings with the item vectors held fixed. The
-          displayed ALS score is min-max normalized across that user's 50 candidates: 1.0 is the strongest candidate and
-          0.0 the weakest. It is a relative score, not a probability.
+          <strong>ALS.</strong> Matrix factorization. The default version treats ratings as implicit feedback: each rated
+          movie is a positive interaction with confidence 1 + α·rating. <strong>ALS (explicit ratings)</strong> is the
+          proposal's version: it learns to predict the star rating itself (squared error on observed ratings, with the
+          same regularisation as Spark MLlib) and ranks movies by predicted rating. When serving, a user's vector is
+          re-solved from their ratings with the movie vectors held fixed. Displayed ALS scores are min-max normalized
+          across the user's candidates: relative scores, not probabilities.
+        </p>
+        <p>
+          <strong>Stage 1 (ALS + KNN merged).</strong> The proposal's shortlist: ALS's top 30 and Item-KNN's top 30 are
+          combined, scores rescaled to 0–1 per model and averaged where both picked a movie, and topped up from ALS to 50.
+          The shortlist is what the LLM stage reorders.
+        </p>
+        <p>
+          <strong>NeuMF.</strong> Neural collaborative filtering (He et al., 2017), the deep-learning baseline: a
+          matrix-factorization branch and a multi-layer network branch trained on "rated it" signals with sampled
+          negatives. It makes its own top-10 list and is compared with the same metrics; it does not feed the LLM stage.
         </p>
       </Section>
 
@@ -158,7 +179,9 @@ export function AboutPage() {
           <li>ALS + LLM reranking is not part of the offline evaluation, because it would need one LLM call per evaluated user.</li>
           <li>LLM explanations are constrained and validated for structure, but their wording is not fact-checked sentence by sentence.</li>
           <li>Tags are community-applied and uneven: many movies have none.</li>
-          <li>MovieLens users are not a random sample of viewers, and ratings stop in October 2023. NeuMF and other neural models are left for future work.</li>
+          <li>MovieLens users are not a random sample of viewers, and ratings stop in October 2023.</li>
+          <li>With the date split, few users are cold-start (1–10 earlier ratings), so cold-start results rest on a small group; the Compare page shows how many.</li>
+          <li>Movies first rated after 2019 have no earlier ratings, so no rating-based model can recommend them in the test period.</li>
         </ul>
         <p>
           <Link to="/recommendations" className="text-rose underline underline-offset-2">Try the recommender</Link>

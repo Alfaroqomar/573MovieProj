@@ -189,6 +189,15 @@ export function UserSummaryCard({ summary, compact = false }: { summary: UserSum
         <h3 className="display-soft text-lg text-paper">User {summary.userId}</h3>
         <span className="num text-sm text-muted">{fmtInt(summary.ratingCount)} ratings</span>
       </div>
+      <p className="num text-sm text-muted">
+        {fmtInt(summary.trainingRatingCount)} in training
+        {summary.splitMode === "date" ? " (before 2020)" : ""}
+        {summary.isColdStart ? (
+          <span className="ml-2 rounded-full border border-warn/60 px-2 py-0.5 text-xs text-warn">
+            Cold-start user
+          </span>
+        ) : null}
+      </p>
       <p className="text-sm text-muted">
         Rated between {fmtDate(summary.firstRatingAt)} and {fmtDate(summary.lastRatingAt)}, averaging{" "}
         <span className="num">{summary.meanRating.toFixed(2)}</span>.

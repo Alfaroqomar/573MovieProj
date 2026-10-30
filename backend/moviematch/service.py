@@ -30,13 +30,44 @@ from moviematch.data.raw import check_raw_dataset
 from moviematch.llm.client import OpenAICompatibleClient
 from moviematch.llm.reranker import FALLBACK_LABEL, ChatClient, RerankResult, rerank_steps
 from moviematch.models.als import AlsCandidate, AlsModel
-from moviematch.models.common import user_row
+from moviematch.models.als_explicit import ExplicitAlsModel
+from moviematch.models.common import min_max, top_k, user_row
 from moviematch.models.item_knn import Evidence, ItemKnnModel
 from moviematch.models.popularity import PopularityModel
+from moviematch.models.stage1 import Stage1Candidate, merge_candidates
 
 logger = logging.getLogger("moviematch.service")
 
-MODES = ("popularity", "item_knn", "als", "als_llm")
+MODES = (
+    "popularity",
+    "popularity_weighted",
+    "item_knn",
+    "als",
+    "als_explicit",
+    "stage1",
+    "neumf",
+    "als_llm",
+)
+CORE_MODELS = ("popularity", "item_knn", "als")
+MODEL_LABELS = {
+    "popularity": "Popularity",
+    "popularity_weighted": "Popularity (weighted)",
+    "item_knn": "Item-KNN",
+    "als": "ALS",
+    "als_explicit": "ALS (explicit)",
+    "stage1": "Stage 1 (merged)",
+    "neumf": "NeuMF",
+}
+TRAIN_HINT = {
+    "als_explicit": "Run `python -m moviematch.cli train --only als_explicit`, then restart the backend.",
+    "neumf": "Install PyTorch (`pip install torch`), run `python -m moviematch.cli train --only neumf`, then restart the backend.",
+}
+
+
+def _torch_installed() -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec("torch") is not None
 
 
 class ApiError(Exception):
@@ -99,12 +130,16 @@ def readiness(
 
     on_disk = {
         "popularity": mp.popularity.exists(),
+        "popularity_weighted": mp.popularity.exists(),
         "item_knn": mp.knn.exists(),
         "als": mp.als.exists() and mp.als_meta.exists(),
+        "als_explicit": mp.als_explicit.exists() and mp.als_explicit_meta.exists(),
+        "neumf": mp.neumf.exists() and mp.neumf_meta.exists() and mp.neumf_support.exists(),
     }
     models = {name: bool(on_disk[name] and processed) for name in on_disk}
     if loaded is not None:
         models = {name: bool(models[name] and loaded.get(name, False)) for name in models}
+    models["stage1"] = models["als"] and models["item_knn"]
     models["als_llm"] = models["als"] and settings.llm.configured
 
     llm = {
@@ -136,7 +171,7 @@ def readiness(
                 "message": "MovieLens 32M was not found. " + (raw.problem() or ""),
                 "action": "Set MOVIELENS_DATA_PATH and run the preprocessing command.",
             })
-    elif not any(on_disk.values()):
+    elif not any(on_disk[n] for n in CORE_MODELS):
         state = "models_not_trained"
         messages.append({
             "level": "warning",
@@ -145,8 +180,8 @@ def readiness(
             "action": "Run the model-training command, then restart the backend.",
         })
     else:
-        state = "ready" if all(models[n] for n in ("popularity", "item_knn", "als")) else "partial"
-        labels = {"popularity": "Popularity", "item_knn": "Item-KNN", "als": "ALS"}
+        state = "ready" if all(models[n] for n in CORE_MODELS) else "partial"
+        labels = {n: MODEL_LABELS[n] for n in CORE_MODELS}
         for name, label in labels.items():
             if not on_disk[name]:
                 messages.append({
@@ -169,6 +204,22 @@ def readiness(
                     "message": f"The {label} model exists on disk but is not loaded.",
                     "action": "Restart the backend to load newly trained models.",
                 })
+
+        for name in ("als_explicit", "neumf"):
+            if models[name]:
+                continue
+            if load_errors and name in load_errors:
+                text = f"The saved {MODEL_LABELS[name]} model could not be loaded ({load_errors[name]})."
+            elif on_disk[name] and loaded is not None:
+                text = f"The {MODEL_LABELS[name]} model exists on disk but is not loaded."
+            else:
+                text = f"The optional {MODEL_LABELS[name]} model has not been trained."
+            messages.append({
+                "level": "info",
+                "code": f"{name}_unavailable",
+                "message": text,
+                "action": TRAIN_HINT[name],
+            })
 
     if not settings.llm.configured:
         messages.append({
@@ -205,12 +256,15 @@ def _iso(ts: int) -> str:
 class MovieMatchService:
     def __init__(self, settings: Settings, llm_client: ChatClient | None = None):
         self.settings = settings
-        self.loaded = {"processed": False, "popularity": False, "item_knn": False, "als": False}
+        self.loaded = {name: False for name in ("processed", *MODEL_LABELS)}
         self.load_errors: dict[str, str] = {}
         self._llm_client = llm_client
         self.popularity: PopularityModel | None = None
+        self.popularity_weighted: PopularityModel | None = None
         self.knn: ItemKnnModel | None = None
         self.als: AlsModel | None = None
+        self.als_explicit: ExplicitAlsModel | None = None
+        self.neumf = None
 
     # ---------------------------- loading ---------------------------------- #
 
@@ -226,10 +280,22 @@ class MovieMatchService:
                 self.load_errors["processed"] = type(exc).__name__
         if self.loaded["processed"]:
             mp = model_paths(settings)
+            def load_neumf():
+                if not _torch_installed():
+                    raise ModuleNotFoundError("PyTorch not installed")
+                from moviematch.models.neumf import NeuMFModel
+
+                return NeuMFModel.load(mp.neumf, mp.neumf_meta)
+
             loaders = {
-                "popularity": lambda: PopularityModel.load(mp.popularity),
-                "item_knn": lambda: ItemKnnModel.load(mp.knn, settings.high_rating_threshold),
+                "popularity": lambda: PopularityModel.load(mp.popularity, "count"),
+                "popularity_weighted": lambda: PopularityModel.load(mp.popularity, "weighted"),
+                "item_knn": lambda: ItemKnnModel.load(
+                    mp.knn, settings.high_rating_threshold, settings.knn_scoring, settings.knn_min_support
+                ),
                 "als": lambda: AlsModel.load(mp.als, mp.als_meta),
+                "als_explicit": lambda: ExplicitAlsModel.load(mp.als_explicit, mp.als_explicit_meta),
+                "neumf": load_neumf,
             }
             for name, loader in loaders.items():
                 if not state.models.get(name):
@@ -237,6 +303,11 @@ class MovieMatchService:
                 try:
                     setattr(self, "knn" if name == "item_knn" else name, loader())
                     self.loaded[name] = True
+                except ModuleNotFoundError:
+                    self.load_errors[name] = "PyTorch not installed"
+                except FileNotFoundError as exc:
+                    logger.warning("%s: %s", name, exc)
+                    self.load_errors[name] = "trained by an older version; retrain"
                 except Exception as exc:  # noqa: BLE001
                     logger.exception("Failed to load %s model", name)
                     self.load_errors[name] = type(exc).__name__
@@ -244,6 +315,9 @@ class MovieMatchService:
                 logger.error("ALS model does not match the processed dataset; retrain it.")
                 self.als, self.loaded["als"] = None, False
                 self.load_errors["als"] = "dataset mismatch"
+            if self.als_explicit is not None and self.als_explicit.n_items != self.n_movies:
+                self.als_explicit, self.loaded["als_explicit"] = None, False
+                self.load_errors["als_explicit"] = "dataset mismatch"
             if self.knn is not None and self.knn.similarity.shape[0] != self.n_movies:
                 logger.error("Item-KNN model does not match the processed dataset; retrain it.")
                 self.knn, self.loaded["item_knn"] = None, False
@@ -278,6 +352,12 @@ class MovieMatchService:
         self.user_id_str = users["userId"].astype(str).to_numpy(dtype=str)
         self.user_rating_count = users["rating_count"].to_numpy()
         self.user_train_count = users["train_count"].to_numpy()
+        self.user_validation_count = (
+            users["validation_count"].to_numpy() if "validation_count" in users else np.zeros(len(users), int)
+        )
+        self.user_is_cold = (
+            users["is_cold_start"].to_numpy() if "is_cold_start" in users else np.zeros(len(users), bool)
+        )
         self.user_mean_rating = users["mean_rating"].to_numpy()
         self.user_first_ts = users["first_timestamp"].to_numpy()
         self.user_last_ts = users["last_timestamp"].to_numpy()
@@ -421,6 +501,10 @@ class MovieMatchService:
             "userId": int(self.user_ids[u]),
             "ratingCount": int(self.user_rating_count[u]),
             "trainingRatingCount": int(self.user_train_count[u]),
+            "validationRatingCount": int(self.user_validation_count[u]),
+            "isColdStart": bool(self.user_is_cold[u]),
+            "coldStartMaxRatings": self.settings.cold_start_max_ratings,
+            "splitMode": self.manifest["config"].get("splitMode", "per_user"),
             "meanRating": round(float(self.user_mean_rating[u]), 3),
             "firstRatingAt": _iso(self.user_first_ts[u]),
             "lastRatingAt": _iso(self.user_last_ts[u]),
@@ -451,12 +535,15 @@ class MovieMatchService:
         return f"Similar to {titles}, which you rated {ratings}."
 
     def _require_model(self, name: str) -> None:
-        labels = {"popularity": "Popularity", "item_knn": "Item-KNN", "als": "ALS"}
         if not self.loaded.get(name):
+            hint = TRAIN_HINT.get(name, "Run the model-training command, then restart the backend.")
+            reason = self.load_errors.get(name)
             raise ApiError(
                 503,
                 "model_unavailable",
-                f"The {labels[name]} model is not available. Run the model-training command, then restart the backend.",
+                f"The {MODEL_LABELS.get(name, name)} model is not available"
+                + (f" ({reason})" if reason else "")
+                + f". {hint}",
             )
 
     def run(
@@ -471,15 +558,21 @@ class MovieMatchService:
         if mode not in MODES:
             raise ApiError(400, "invalid_mode", f"Unknown mode {mode}.")
         self.require_processed()
-        if mode == "popularity":
-            self._require_model("popularity")
-        elif mode == "item_knn":
-            self._require_model("item_knn")
-        else:
-            self._require_model("als")
+        required = {
+            "popularity": ["popularity"],
+            "popularity_weighted": ["popularity_weighted"],
+            "item_knn": ["item_knn"],
+            "als": ["als"],
+            "als_explicit": ["als_explicit"],
+            "stage1": ["als", "item_knn"],
+            "neumf": ["neumf"],
+            "als_llm": ["als"],
+        }[mode]
+        for name in required:
+            self._require_model(name)
         if mode == "als_llm" and (not self.settings.llm.configured or self._llm_client is None):
             raise ApiError(409, "llm_not_configured", "LLM reranking is not configured.")
-        top_n = min(top_n, candidate_count) if mode in ("als", "als_llm") else top_n
+        top_n = min(top_n, candidate_count) if mode in ("als", "als_explicit", "als_llm") else top_n
         u = self.user_index(user_id)  # validate before any progress events
         return self._run(mode, u, user_id, top_n, candidate_count, user_request)
 
@@ -517,11 +610,23 @@ class MovieMatchService:
             "llm": None,
         }
 
-        if mode == "popularity":
+        if mode in ("popularity", "popularity_weighted"):
             yield stage("ranking_popularity", "started")
             t0 = time.perf_counter()
-            assert self.popularity is not None
-            for rank, item in enumerate(self.popularity.recommend(history, top_n), start=1):
+            model = self.popularity if mode == "popularity" else self.popularity_weighted
+            assert model is not None
+            for rank, item in enumerate(model.recommend(history, top_n), start=1):
+                if mode == "popularity":
+                    text = (
+                        f"One of the most-rated movies: {item.rating_count:,} training ratings, "
+                        f"averaging {item.mean_rating:.2f}/5."
+                    )
+                else:
+                    text = (
+                        ("Widely and well rated: " if item.rating_count >= model.min_votes else "")
+                        + f"{item.rating_count:,} training ratings averaging "
+                        f"{item.mean_rating:.2f}/5 (weighted rating {item.weighted_rating:.2f})."
+                    )
                 recommendations.append({
                     "movie": self.movie_out(item.movie_idx),
                     "mode": mode,
@@ -529,11 +634,7 @@ class MovieMatchService:
                     "popularityScore": round(item.weighted_rating, 4),
                     "ratingCount": item.rating_count,
                     "meanRating": round(item.mean_rating, 3),
-                    "explanation": (
-                        ("Widely and well rated: " if item.rating_count >= self.popularity.min_votes else "")
-                        + f"{item.rating_count:,} training ratings averaging "
-                        f"{item.mean_rating:.2f}/5 (weighted rating {item.weighted_rating:.2f})."
-                    ),
+                    "explanation": text,
                     "explanationSource": "template",
                     "usedFallback": False,
                 })
@@ -546,20 +647,144 @@ class MovieMatchService:
             assert self.knn is not None
             picks = self.knn.recommend(history, history_ratings, top_n)
             evidence = self.knn.evidence(history, history_ratings, [i for i, _ in picks])
+            average = self.knn.scoring == "average"
+            response["knnScoring"] = self.knn.scoring
             for rank, (idx, score) in enumerate(picks, start=1):
                 ev = self._evidence_out(evidence.get(idx, []))
+                lead = f"Predicted rating {min(score, 5.0):.1f}/5 from similar movies you rated. " if average else ""
                 recommendations.append({
                     "movie": self.movie_out(idx),
                     "mode": mode,
                     "finalRank": rank,
                     "knnScore": round(score, 4),
                     "knnEvidence": ev,
-                    "explanation": self._evidence_sentence(ev) or "Similar to movies in your rating history.",
+                    "explanation": (lead + (self._evidence_sentence(ev) or "Similar to movies in your rating history.")).strip(),
                     "explanationSource": "template",
                     "usedFallback": False,
                 })
             timings["itemKnn"] = (time.perf_counter() - t0) * 1000
             yield stage("finding_similar", "done")
+
+        elif mode == "als_explicit":
+            yield stage("generating_als", "started")
+            t0 = time.perf_counter()
+            assert self.als_explicit is not None
+            pool = self.als_explicit.candidates(history, history_ratings, max(top_n, 1))
+            timings["alsExplicit"] = (time.perf_counter() - t0) * 1000
+            yield stage("generating_als", "done", candidates=len(pool))
+            yield stage("finding_similar", "started")
+            evidence = self.knn.evidence(history, history_ratings, [c.movie_idx for c in pool]) if self.knn else {}
+            yield stage("finding_similar", "done", available=self.knn is not None)
+            for c in pool:
+                ev = self._evidence_out(evidence.get(c.movie_idx, []))
+                recommendations.append({
+                    "movie": self.movie_out(c.movie_idx),
+                    "mode": mode,
+                    "finalRank": c.rank,
+                    "originalAlsRank": c.rank,
+                    "alsScore": round(c.normalized_score, 4),
+                    "alsRawScore": round(c.raw_score, 5),
+                    "predictedRating": round(c.raw_score, 3),
+                    "knnEvidence": ev,
+                    "strongestKnnSimilarity": ev[0]["similarity"] if ev else None,
+                    "explanation": (
+                        f"Explicit ALS predicts you would rate this {min(c.raw_score, 5.0):.1f}/5. "
+                        + self._evidence_sentence(ev)
+                    ).strip(),
+                    "explanationSource": "template",
+                    "usedFallback": False,
+                })
+
+        elif mode == "stage1":
+            yield stage("generating_als", "started")
+            t0 = time.perf_counter()
+            assert self.als is not None and self.knn is not None
+            als_scores = self.als.scores_for_vector(self.als.user_vector(history, history_ratings))
+            timings["als"] = (time.perf_counter() - t0) * 1000
+            yield stage("generating_als", "done")
+            yield stage("finding_similar", "started")
+            t0 = time.perf_counter()
+            knn_scores = self.knn.scores(history, history_ratings)
+            timings["itemKnn"] = (time.perf_counter() - t0) * 1000
+            yield stage("finding_similar", "done")
+            yield stage("merging_candidates", "started")
+            t0 = time.perf_counter()
+            pool1: list[Stage1Candidate] = merge_candidates(
+                als_scores, knn_scores, history,
+                self.settings.stage1_per_model, self.settings.stage1_pool_size, self.settings.stage1_top_up,
+            )
+            evidence = self.knn.evidence(history, history_ratings, [c.movie_idx for c in pool1[:top_n]])
+            timings["merge"] = (time.perf_counter() - t0) * 1000
+            response["candidateCount"] = len(pool1)
+            response["candidateSources"] = {
+                src: sum(1 for c in pool1 if c.source == src) for src in ("both", "als", "knn", "als_top_up")
+            }
+            yield stage("merging_candidates", "done", candidates=len(pool1))
+            per = self.settings.stage1_per_model
+            for c in pool1[:top_n]:
+                ev = self._evidence_out(evidence.get(c.movie_idx, []))
+                where = {
+                    "both": f"In both ALS's and Item-KNN's top {per}",
+                    "als": f"In ALS's top {per}",
+                    "knn": f"In Item-KNN's top {per}",
+                    "als_top_up": "Added from ALS's next ranks to fill the shortlist",
+                }[c.source]
+                recommendations.append({
+                    "movie": self.movie_out(c.movie_idx),
+                    "mode": mode,
+                    "finalRank": c.rank,
+                    "mergedScore": round(c.merged_score, 4),
+                    "alsScore": None if c.als_score is None else round(c.als_score, 4),
+                    "knnScore": None if c.knn_score is None else round(c.knn_score, 4),
+                    "originalAlsRank": c.als_rank,
+                    "knnRank": c.knn_rank,
+                    "candidateSource": c.source,
+                    "knnEvidence": ev,
+                    "strongestKnnSimilarity": ev[0]["similarity"] if ev else None,
+                    "explanation": (f"{where}; merged score {c.merged_score:.2f}. " + self._evidence_sentence(ev)).strip(),
+                    "explanationSource": "template",
+                    "usedFallback": False,
+                })
+
+        elif mode == "neumf":
+            yield stage("scoring_neumf", "started")
+            t0 = time.perf_counter()
+            assert self.neumf is not None
+            if self.neumf.knows(u):
+                scores = self.neumf.scores(u)
+                picks = top_k(scores, max(top_n, 1), exclude=history)
+                norm = min_max(scores[picks]) if len(picks) else np.zeros(0)
+                for rank, idx in enumerate(picks, start=1):
+                    recommendations.append({
+                        "movie": self.movie_out(int(idx)),
+                        "mode": mode,
+                        "finalRank": rank,
+                        "neumfScore": round(float(norm[rank - 1]), 4),
+                        "explanation": (
+                            f"NeuMF ranked this #{rank} for you from patterns it learned across all users' ratings."
+                        ),
+                        "explanationSource": "template",
+                        "usedFallback": False,
+                    })
+            else:
+                response.update({
+                    "usedFallback": True,
+                    "fallbackLabel": "Most-rated movies, because NeuMF has no training data for this user.",
+                    "fallbackReason": "This user has no ratings in the data NeuMF was trained on.",
+                })
+                if self.popularity is not None:
+                    for rank, item in enumerate(self.popularity.recommend(history, top_n), start=1):
+                        recommendations.append({
+                            "movie": self.movie_out(item.movie_idx),
+                            "mode": mode,
+                            "finalRank": rank,
+                            "ratingCount": item.rating_count,
+                            "explanation": f"One of the most-rated movies: {item.rating_count:,} training ratings.",
+                            "explanationSource": "template",
+                            "usedFallback": True,
+                        })
+            timings["neumf"] = (time.perf_counter() - t0) * 1000
+            yield stage("scoring_neumf", "done")
 
         else:
             # 2. ALS candidates.

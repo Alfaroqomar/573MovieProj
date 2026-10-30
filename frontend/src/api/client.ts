@@ -82,14 +82,19 @@ export interface RecommendParams {
 
 const ENDPOINTS: Record<RecommendationMode, string> = {
   popularity: "/api/recommendations/popularity",
+  popularity_weighted: "/api/recommendations/popularity-weighted",
   item_knn: "/api/recommendations/knn",
   als: "/api/recommendations/als",
+  als_explicit: "/api/recommendations/als-explicit",
+  stage1: "/api/recommendations/stage1",
+  neumf: "/api/recommendations/neumf",
   als_llm: "/api/recommendations/als-llm",
 };
 
 function body(params: RecommendParams): string {
   const payload: Record<string, unknown> = { userId: params.userId, topN: params.topN };
-  if (params.mode === "als" || params.mode === "als_llm") payload.candidateCount = params.candidateCount ?? 50;
+  if (params.mode === "als" || params.mode === "als_explicit" || params.mode === "als_llm")
+    payload.candidateCount = params.candidateCount ?? 50;
   if (params.mode === "als_llm") payload.userRequest = params.userRequest ?? "";
   return JSON.stringify(payload);
 }

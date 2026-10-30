@@ -183,61 +183,99 @@ def load_links(path: Path, movie_ids: np.ndarray, log: Log) -> tuple[pd.DataFram
     return frame[["movieId", "imdbId", "tmdbId"]], report
 
 
+@dataclass
+class RatingArrays:
+    """Cleaned ratings as plain arrays, sorted by user, then movie."""
+
+    user_id: np.ndarray    # int64
+    movie_id: np.ndarray   # int64
+    rating: np.ndarray     # float32
+    timestamp: np.ndarray  # int64
+
+    def __len__(self) -> int:
+        return len(self.user_id)
+
+
+def _column(table: pa.Table, name: str, fill: float, dtype: type) -> np.ndarray:
+    """One CSV column as a numpy array, with nulls replaced by ``fill``."""
+    import pyarrow.compute as pc
+
+    column = table.column(name)
+    if column.null_count:
+        column = pc.fill_null(column, fill)
+    return column.to_numpy().astype(dtype, copy=False)
+
+
 def load_ratings(
     path: Path, movie_ids: np.ndarray, log: Log
-) -> tuple[pd.DataFrame, CleaningReport]:
-    frame, skipped = _read_csv(
-        path,
-        {
-            "userId": pa.int64(),
-            "movieId": pa.int64(),
-            "rating": pa.float64(),
-            "timestamp": pa.int64(),
-        },
-    )
-    rows_read = len(frame) + skipped
+) -> tuple[RatingArrays, CleaningReport]:
+    """Load ratings.csv with low memory use (about 2 GB for MovieLens 32M).
+
+    Columns are converted one at a time to compact numpy arrays, and
+    duplicates are found by sorting instead of hashing.
+    """
+    skipped = 0
+
+    def on_invalid(_row: pacsv.InvalidRow) -> str:
+        nonlocal skipped
+        skipped += 1
+        return "skip"
+
+    try:
+        table = pacsv.read_csv(
+            path,
+            read_options=csv_read_options(),
+            parse_options=pacsv.ParseOptions(invalid_row_handler=on_invalid),
+            convert_options=pacsv.ConvertOptions(
+                column_types={
+                    "userId": pa.int64(),
+                    "movieId": pa.int64(),
+                    "rating": pa.float64(),
+                    "timestamp": pa.int64(),
+                },
+                include_columns=["userId", "movieId", "rating", "timestamp"],
+            ),
+        )
+        user = _column(table, "userId", -1, np.int64)
+        movie = _column(table, "movieId", -1, np.int64)
+        rating = _column(table, "rating", -1.0, np.float64)
+        stamp = _column(table, "timestamp", -1, np.int64)
+        del table
+    except pa.ArrowInvalid:
+        # A value could not be parsed as a number: fall back to a tolerant reader.
+        frame = pd.read_csv(path, dtype=str, usecols=["userId", "movieId", "rating", "timestamp"],
+                            on_bad_lines="skip", keep_default_na=False)
+        user = pd.to_numeric(frame["userId"], errors="coerce").fillna(-1).to_numpy(np.int64)
+        movie = pd.to_numeric(frame["movieId"], errors="coerce").fillna(-1).to_numpy(np.int64)
+        rating = pd.to_numeric(frame["rating"], errors="coerce").fillna(-1).to_numpy(np.float64)
+        stamp = pd.to_numeric(frame["timestamp"], errors="coerce").fillna(-1).to_numpy(np.int64)
+        del frame
+    rows_read = len(user) + skipped
     log(f"  ratings.csv: read {rows_read:,} rows")
 
-    user = frame["userId"].to_numpy(dtype=np.float64, na_value=np.nan)
-    movie = frame["movieId"].to_numpy(dtype=np.float64, na_value=np.nan)
-    rating = frame["rating"].to_numpy(dtype=np.float64, na_value=np.nan)
-    stamp = frame["timestamp"].to_numpy(dtype=np.float64, na_value=np.nan)
-    del frame
-
-    valid = (
-        np.isfinite(user)
-        & np.isfinite(movie)
-        & np.isfinite(rating)
-        & np.isfinite(stamp)
-        & (user > 0)
-        & (movie > 0)
-        & (rating >= 0.5)
-        & (rating <= 5.0)
-        & np.isclose(rating * 2, np.round(rating * 2))
-        & (stamp >= 0)
-    )
+    valid = (user > 0) & (movie > 0) & (stamp >= 0)
+    valid &= (rating >= 0.5) & (rating <= 5.0) & np.isclose(rating * 2, np.round(rating * 2))
     valid &= np.isin(movie, movie_ids)
     invalid = int((~valid).sum())
+    if invalid:
+        user, movie, rating, stamp = user[valid], movie[valid], rating[valid], stamp[valid]
+    del valid
+    rating = rating.astype(np.float32)
 
-    ratings = pd.DataFrame(
-        {
-            "userId": user[valid].astype(np.int64),
-            "movieId": movie[valid].astype(np.int64),
-            "rating": rating[valid].astype(np.float32),
-            "timestamp": stamp[valid].astype(np.int64),
-        }
-    )
-    del user, movie, rating, stamp, valid
+    # Keep the most recent rating when a user rated the same movie twice:
+    # after sorting by (user, movie, time) duplicates sit next to each other.
+    order = np.lexsort((stamp, movie, user))
+    user, movie, rating, stamp = user[order], movie[order], rating[order], stamp[order]
+    del order
+    keep = np.ones(len(user), dtype=bool)
+    if len(user) > 1:
+        keep[:-1] = (user[1:] != user[:-1]) | (movie[1:] != movie[:-1])
+    duplicates = int((~keep).sum())
+    if duplicates:
+        user, movie, rating, stamp = user[keep], movie[keep], rating[keep], stamp[keep]
+    del keep
 
-    # Keep the most recent rating when a user rated the same movie twice.
-    before = len(ratings)
-    order = np.lexsort(
-        (ratings["timestamp"].to_numpy(), ratings["movieId"].to_numpy(), ratings["userId"].to_numpy())
-    )
-    ratings = ratings.iloc[order].reset_index(drop=True)
-    ratings = ratings.drop_duplicates(["userId", "movieId"], keep="last").reset_index(drop=True)
-    duplicates = before - len(ratings)
-
+    ratings = RatingArrays(user, movie, rating, stamp)
     report = CleaningReport(rows_read, skipped, invalid, duplicates, len(ratings))
     log(
         f"  ratings.csv: {report.rows_kept:,} ratings kept "
@@ -314,6 +352,27 @@ def chronological_split(
     return split
 
 
+def date_to_timestamp(day: str) -> int:
+    """'YYYY-MM-DD' (UTC midnight) -> Unix seconds."""
+    parsed = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    return int(parsed.timestamp())
+
+
+def date_split(timestamp: np.ndarray, validation_start: str, test_start: str) -> np.ndarray:
+    """Proposal split: one calendar cutoff for everyone.
+
+    Ratings before ``validation_start`` -> train, from ``validation_start``
+    up to (not including) ``test_start`` -> validation, the rest -> test.
+    """
+    v, t = date_to_timestamp(validation_start), date_to_timestamp(test_start)
+    if v >= t:
+        raise ValueError("SPLIT_VALIDATION_START must be earlier than SPLIT_TEST_START")
+    split = np.full(len(timestamp), SPLIT_TEST, dtype=np.int8)
+    split[timestamp < t] = SPLIT_VALIDATION
+    split[timestamp < v] = SPLIT_TRAIN
+    return split
+
+
 def build_matrix(
     user_idx: np.ndarray, movie_idx: np.ndarray, values: np.ndarray, n_users: int, n_movies: int
 ) -> sp.csr_matrix:
@@ -362,19 +421,22 @@ def user_summaries(
     genres_by_movie: sp.csr_matrix,
     genre_vocabulary: list[str],
     high_threshold: float,
+    cold_start_max: int = 10,
     top_genres: int = 3,
     top_movies: int = 10,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+    recent_movies: int = 5,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     n_users = len(user_ids)
     counts = np.bincount(user_idx, minlength=n_users)
     train_counts = np.bincount(user_idx[split == SPLIT_TRAIN], minlength=n_users)
+    validation_counts = np.bincount(user_idx[split == SPLIT_VALIDATION], minlength=n_users)
     sums = np.bincount(user_idx, weights=rating, minlength=n_users)
     means = np.divide(sums, counts, out=np.zeros(n_users), where=counts > 0)
     # Interactions are grouped by user and sorted by time, so each user's
     # first and last timestamps sit at the group boundaries.
     ends = np.cumsum(counts)
-    starts = ends - counts
-    first_ts = timestamp[np.minimum(starts, len(timestamp) - 1)].astype(np.int64)
+    user_starts = ends - counts
+    first_ts = timestamp[np.minimum(user_starts, len(timestamp) - 1)].astype(np.int64)
     last_ts = timestamp[np.maximum(ends - 1, 0)].astype(np.int64)
 
     # Favourite genres: genres of movies the user rated highly; users with no
@@ -400,6 +462,8 @@ def user_summaries(
             "userId": user_ids.astype(np.int64),
             "rating_count": counts.astype(np.int32),
             "train_count": train_counts.astype(np.int32),
+            "validation_count": validation_counts.astype(np.int32),
+            "is_cold_start": (train_counts >= 1) & (train_counts <= cold_start_max),
             "mean_rating": means.astype(np.float32),
             "first_timestamp": first_ts,
             "last_timestamp": last_ts,
@@ -414,8 +478,8 @@ def user_summaries(
     order = np.lexsort((-ht, -hr, hu))
     hu, hm, hr = hu[order], hm[order], hr[order]
     if len(hu):
-        starts = np.concatenate(([0], np.flatnonzero(np.diff(hu)) + 1))
-        group_start = np.repeat(starts, np.diff(np.concatenate((starts, [len(hu)]))))
+        hstarts = np.concatenate(([0], np.flatnonzero(np.diff(hu)) + 1))
+        group_start = np.repeat(hstarts, np.diff(np.concatenate((hstarts, [len(hu)]))))
         rank = np.arange(len(hu)) - group_start
     else:
         rank = np.zeros(0, dtype=np.int64)
@@ -428,7 +492,55 @@ def user_summaries(
             "rating": hr[keep].astype(np.float32),
         }
     )
-    return users, top
+
+    # Most recently rated movies (the proposal's prompt uses the last five).
+    # Rows are grouped by user and sorted by time, so they are the tail of
+    # each user's block.
+    position = np.arange(len(user_idx)) - user_starts[user_idx]
+    from_end = counts[user_idx] - position  # 1 = most recent
+    recent_mask = from_end <= recent_movies
+    recent = pd.DataFrame(
+        {
+            "user_idx": user_idx[recent_mask].astype(np.int32),
+            "rank": from_end[recent_mask].astype(np.int16),
+            "movie_idx": movie_idx[recent_mask].astype(np.int32),
+            "rating": rating[recent_mask].astype(np.float32),
+            "timestamp": timestamp[recent_mask].astype(np.int64),
+        }
+    ).sort_values(["user_idx", "rank"]).reset_index(drop=True)
+    return users, top, recent
+
+
+def describe_split(
+    split: np.ndarray,
+    user_idx: np.ndarray,
+    movie_idx: np.ndarray,
+    rating: np.ndarray,
+    n_users: int,
+    n_movies: int,
+    users: pd.DataFrame,
+    high_threshold: float,
+) -> dict[str, object]:
+    """Counts that explain what the split means for evaluation."""
+    train = split == SPLIT_TRAIN
+    train_movie_counts = np.bincount(movie_idx[train], minlength=n_movies)
+    out: dict[str, object] = {
+        "usersWithoutTrainingRatings": int((users["train_count"] == 0).sum()),
+        "coldStartUsers": int(users["is_cold_start"].sum()),
+        "moviesWithTrainingRatings": int((train_movie_counts > 0).sum()),
+    }
+    for name, code in (("validation", SPLIT_VALIDATION), ("test", SPLIT_TEST)):
+        mask = split == code
+        users_in = np.unique(user_idx[mask])
+        liked = mask & (rating >= high_threshold)
+        unseen_movie = train_movie_counts[movie_idx[liked]] == 0
+        out[name] = {
+            "users": int(len(users_in)),
+            "usersWithTrainingHistory": int((users["train_count"].to_numpy()[users_in] > 0).sum()),
+            "likedRatings": int(liked.sum()),
+            "likedRatingsOnMoviesUnseenInTraining": int(unseen_movie.sum()),
+        }
+    return out
 
 
 def _iso(ts: int) -> str:
@@ -465,17 +577,17 @@ def preprocess(settings: Settings, log: Log = print) -> dict[str, object]:
     links, links_report = load_links(data_path / "links.csv", movie_ids, log)
     ratings, ratings_report = load_ratings(data_path / "ratings.csv", movie_ids, log)
     tags, tags_report = load_tags(data_path / "tags.csv", movie_ids, log)
-    if ratings.empty:
+    if len(ratings) == 0:
         raise DatasetError("ratings.csv contained no valid ratings.")
 
     # 6. Internal indices. Every movie in movies.csv gets an index so that
     #    tags and metadata are available even for unrated movies.
     movie_index = pd.Series(np.arange(len(movies), dtype=np.int32), index=movies["movieId"])
-    user_ids = np.unique(ratings["userId"].to_numpy())
-    user_idx = np.searchsorted(user_ids, ratings["userId"].to_numpy()).astype(np.int32)
-    movie_idx = np.searchsorted(movie_ids, ratings["movieId"].to_numpy()).astype(np.int32)
-    rating = ratings["rating"].to_numpy(dtype=np.float32)
-    timestamp = ratings["timestamp"].to_numpy(dtype=np.int64)
+    user_ids = np.unique(ratings.user_id)
+    user_idx = np.searchsorted(user_ids, ratings.user_id).astype(np.int32)
+    movie_idx = np.searchsorted(movie_ids, ratings.movie_id).astype(np.int32)
+    rating = ratings.rating
+    timestamp = ratings.timestamp
     del ratings
     n_users, n_movies = len(user_ids), len(movie_ids)
 
@@ -486,10 +598,15 @@ def preprocess(settings: Settings, log: Log = print) -> dict[str, object]:
     )
     del order
 
-    # 8. Chronological per-user split.
-    split = chronological_split(
-        user_idx, settings.train_fraction, settings.validation_fraction
-    )
+    # 8. Chronological split: one calendar cutoff (proposal) or per user.
+    if settings.split_mode == "date":
+        split = date_split(timestamp, settings.split_validation_start, settings.split_test_start)
+    elif settings.split_mode == "per_user":
+        split = chronological_split(
+            user_idx, settings.train_fraction, settings.validation_fraction
+        )
+    else:
+        raise DatasetError("SPLIT_MODE must be 'date' or 'per_user'.")
     split_counts = {
         "train": int((split == SPLIT_TRAIN).sum()),
         "validation": int((split == SPLIT_VALIDATION).sum()),
@@ -533,10 +650,19 @@ def preprocess(settings: Settings, log: Log = print) -> dict[str, object]:
     full_matrix = build_matrix(user_idx, movie_idx, rating, n_users, n_movies)
 
     # 12. User summaries.
-    users, top_movies = user_summaries(
+    users, top_movies, recent_movies = user_summaries(
         user_ids, user_idx, movie_idx, rating, timestamp, split, full_matrix,
         genre_matrix(movies_out["genres"].tolist(), genre_vocabulary),
-        genre_vocabulary, settings.high_rating_threshold,
+        genre_vocabulary, settings.high_rating_threshold, settings.cold_start_max_ratings,
+    )
+    split_details = describe_split(
+        split, user_idx, movie_idx, rating, n_users, n_movies,
+        users, settings.high_rating_threshold,
+    )
+    log(
+        f"  users with no training ratings: {split_details['usersWithoutTrainingRatings']:,}; "
+        f"cold-start users (1-{settings.cold_start_max_ratings} training ratings): "
+        f"{split_details['coldStartUsers']:,}"
     )
 
     # 9. Persist.
@@ -556,6 +682,7 @@ def preprocess(settings: Settings, log: Log = print) -> dict[str, object]:
     ).to_parquet(paths.ratings, index=False)
     users.to_parquet(paths.users, index=False)
     top_movies.to_parquet(paths.user_top_movies, index=False)
+    recent_movies.to_parquet(paths.user_recent_movies, index=False)
     sp.save_npz(paths.train_matrix, train_matrix, compressed=False)
     sp.save_npz(paths.full_matrix, full_matrix, compressed=False)
 
@@ -583,6 +710,7 @@ def preprocess(settings: Settings, log: Log = print) -> dict[str, object]:
         "lastRatingAt": _iso(int(timestamp.max())),
         "medianRatingsPerUser": float(np.median(users["rating_count"])),
         "split": split_counts,
+        "splitDetails": split_details,
         "genres": genre_counts,
         "mostRatedMovieIdx": [int(i) for i in most_rated if counts_all[i] > 0],
     }
@@ -612,10 +740,18 @@ def preprocess(settings: Settings, log: Log = print) -> dict[str, object]:
             "tags": tags_report.as_dict(),
         },
         "config": {
-            "split": "chronological per user",
-            "trainFraction": settings.train_fraction,
-            "validationFraction": settings.validation_fraction,
-            "testFraction": round(1 - settings.train_fraction - settings.validation_fraction, 6),
+            "splitMode": settings.split_mode,
+            "split": (
+                f"by date: train < {settings.split_validation_start} <= validation < "
+                f"{settings.split_test_start} <= test"
+                if settings.split_mode == "date"
+                else "chronological per user"
+            ),
+            "validationStart": settings.split_validation_start if settings.split_mode == "date" else None,
+            "testStart": settings.split_test_start if settings.split_mode == "date" else None,
+            "trainFraction": settings.train_fraction if settings.split_mode == "per_user" else None,
+            "validationFraction": settings.validation_fraction if settings.split_mode == "per_user" else None,
+            "coldStartMaxTrainingRatings": settings.cold_start_max_ratings,
             "tieBreak": "timestamp, then movieId",
             "duplicateRatings": "keep most recent",
             "highRatingThreshold": settings.high_rating_threshold,

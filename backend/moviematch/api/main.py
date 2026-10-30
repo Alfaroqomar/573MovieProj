@@ -89,10 +89,11 @@ def create_app(settings: Settings | None = None, llm_client: ChatClient | None =
         svc = service(request)
         state = svc.readiness()
         modes = {
-            "popularity": state.models["popularity"],
-            "item_knn": state.models["item_knn"],
-            "als": state.models["als"],
-            "als_llm": state.models["als_llm"],
+            name: bool(state.models.get(name))
+            for name in (
+                "popularity", "popularity_weighted", "item_knn", "als",
+                "als_explicit", "stage1", "neumf", "als_llm",
+            )
         }
         default_mode = "als_llm" if modes["als_llm"] else "als"
         return {
@@ -193,6 +194,24 @@ def create_app(settings: Settings | None = None, llm_client: ChatClient | None =
         return respond(
             service(request).run("als", body.userId, body.topN, body.candidateCount), stream
         )
+
+    @app.post("/api/recommendations/popularity-weighted")
+    def recommend_popularity_weighted(request: Request, body: RecommendationRequest, stream: bool = False):
+        return respond(service(request).run("popularity_weighted", body.userId, body.topN), stream)
+
+    @app.post("/api/recommendations/als-explicit")
+    def recommend_als_explicit(request: Request, body: AlsRecommendationRequest, stream: bool = False):
+        return respond(
+            service(request).run("als_explicit", body.userId, body.topN, body.candidateCount), stream
+        )
+
+    @app.post("/api/recommendations/stage1")
+    def recommend_stage1(request: Request, body: RecommendationRequest, stream: bool = False):
+        return respond(service(request).run("stage1", body.userId, body.topN), stream)
+
+    @app.post("/api/recommendations/neumf")
+    def recommend_neumf(request: Request, body: RecommendationRequest, stream: bool = False):
+        return respond(service(request).run("neumf", body.userId, body.topN), stream)
 
     @app.post("/api/recommendations/als-llm")
     def recommend_als_llm(request: Request, body: LlmRecommendationRequest, stream: bool = False):

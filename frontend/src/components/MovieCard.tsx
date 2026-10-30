@@ -17,9 +17,24 @@ export function RankShift({ from, to }: { from: number; to: number }) {
   );
 }
 
+const SOURCE_LABELS: Record<string, string> = {
+  both: "ALS and Item-KNN",
+  als: "ALS",
+  knn: "Item-KNN",
+  als_top_up: "ALS (top-up)",
+};
+
 export function scoreRows(rec: Recommendation): Array<[string, string] | false> {
+  if (rec.usedFallback && rec.mode === "neumf") {
+    return [["Training ratings", rec.ratingCount != null ? fmtInt(rec.ratingCount) : "n/a"]];
+  }
   switch (rec.mode) {
     case "popularity":
+      return [
+        ["Training ratings", rec.ratingCount != null ? fmtInt(rec.ratingCount) : "n/a"],
+        ["Mean rating", fmtScore(rec.meanRating)],
+      ];
+    case "popularity_weighted":
       return [
         ["Weighted rating", fmtScore(rec.popularityScore)],
         ["Training ratings", rec.ratingCount != null ? fmtInt(rec.ratingCount) : "n/a"],
@@ -35,6 +50,21 @@ export function scoreRows(rec: Recommendation): Array<[string, string] | false> 
         ["ALS rank", `#${rec.originalAlsRank}`],
         ["ALS score", fmtScore(rec.alsScore)],
       ];
+    case "als_explicit":
+      return [
+        ["Predicted rating", rec.predictedRating != null ? `${Math.min(rec.predictedRating, 5).toFixed(2)} / 5` : "n/a"],
+        ["Relative score", fmtScore(rec.alsScore)],
+      ];
+    case "stage1":
+      return [
+        ["Shortlist rank", `#${rec.finalRank} of 50`],
+        ["Picked by", SOURCE_LABELS[rec.candidateSource ?? ""] ?? "n/a"],
+        ["Merged score", fmtScore(rec.mergedScore)],
+        rec.originalAlsRank != null && ["ALS rank", `#${rec.originalAlsRank}`],
+        rec.knnRank != null && ["Item-KNN rank", `#${rec.knnRank}`],
+      ];
+    case "neumf":
+      return [["NeuMF score", fmtScore(rec.neumfScore)]];
     case "als_llm":
       return [
         ["Original ALS rank", `#${rec.originalAlsRank}`],

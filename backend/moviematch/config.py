@@ -114,6 +114,31 @@ class Settings:
     eval_sample_users: int
     eval_random_seed: int
 
+    # Proposal-aligned settings (all have defaults so older code paths keep working)
+    split_mode: str = "date"                      # "date" (proposal) or "per_user"
+    split_validation_start: str = "2020-01-01"    # date mode: first day of validation
+    split_test_start: str = "2022-01-01"          # date mode: first day of test
+    cold_start_max_ratings: int = 10              # proposal: <= 10 training ratings
+    knn_scoring: str = "sum"                      # "sum" (chosen on validation) or "average" (proposal Eq. 2)
+    knn_min_support: int = 2
+    als_explicit_factors: int = 64
+    als_explicit_regularization: float = 0.05
+    als_explicit_iterations: int = 10
+    stage1_per_model: int = 30                    # proposal: top 30 from each model
+    stage1_pool_size: int = 50                    # proposal: up to 50 candidates
+    stage1_top_up: bool = True                    # fill to 50 from ALS ranks 31+
+    neumf_gmf_dim: int = 32
+    neumf_mlp_layers: tuple[int, ...] = (64, 32, 16)
+    neumf_negatives: int = 4
+    neumf_epochs: int = 10
+    neumf_batch_size: int = 8192
+    neumf_learning_rate: float = 0.001
+    neumf_patience: int = 2
+    neumf_max_train_ratings: int = 0              # 0 = use every training rating
+    neumf_device: str = "auto"                    # auto | cpu | mps | cuda
+    eval_cold_start_extra: int = 5000             # extra cold-start users for that group
+    eval_bootstrap: int = 1000
+
     @property
     def processed_dir(self) -> Path:
         return self.artifacts_dir / "processed"
@@ -161,6 +186,31 @@ def load_settings() -> Settings:
         als_random_seed=_env_int("ALS_RANDOM_SEED", 42),
         eval_sample_users=_env_int("EVAL_SAMPLE_USERS", 10000),
         eval_random_seed=_env_int("EVAL_RANDOM_SEED", 42),
+        split_mode=_env_str("SPLIT_MODE", "date").lower(),
+        split_validation_start=_env_str("SPLIT_VALIDATION_START", "2020-01-01"),
+        split_test_start=_env_str("SPLIT_TEST_START", "2022-01-01"),
+        cold_start_max_ratings=_env_int("COLD_START_MAX_RATINGS", 10),
+        knn_scoring=_env_str("KNN_SCORING", "sum").lower(),
+        knn_min_support=_env_int("KNN_MIN_SUPPORT", 2),
+        als_explicit_factors=_env_int("ALS_EXPLICIT_FACTORS", 64),
+        als_explicit_regularization=_env_float("ALS_EXPLICIT_REGULARIZATION", 0.05),
+        als_explicit_iterations=_env_int("ALS_EXPLICIT_ITERATIONS", 10),
+        stage1_per_model=_env_int("STAGE1_PER_MODEL", 30),
+        stage1_pool_size=_env_int("STAGE1_POOL_SIZE", 50),
+        stage1_top_up=_env_bool("STAGE1_TOP_UP", True),
+        neumf_gmf_dim=_env_int("NEUMF_GMF_DIM", 32),
+        neumf_mlp_layers=tuple(
+            int(x) for x in _env_str("NEUMF_MLP_LAYERS", "64,32,16").split(",") if x.strip()
+        ),
+        neumf_negatives=_env_int("NEUMF_NEGATIVES", 4),
+        neumf_epochs=_env_int("NEUMF_EPOCHS", 10),
+        neumf_batch_size=_env_int("NEUMF_BATCH_SIZE", 8192),
+        neumf_learning_rate=_env_float("NEUMF_LEARNING_RATE", 0.001),
+        neumf_patience=_env_int("NEUMF_PATIENCE", 2),
+        neumf_max_train_ratings=_env_int("NEUMF_MAX_TRAIN_RATINGS", 0),
+        neumf_device=_env_str("NEUMF_DEVICE", "auto").lower(),
+        eval_cold_start_extra=_env_int("EVAL_COLD_START_EXTRA", 5000),
+        eval_bootstrap=_env_int("EVAL_BOOTSTRAP", 1000),
     )
 
 
