@@ -23,8 +23,12 @@ preprocess:
 train:
 	$(BACKEND) $(PYTHON) -m moviematch.cli train
 
+# NeuMF must include validation ratings, or users with no pre-2020 ratings get no NeuMF picks.
+NEUMF_MAX_TRAIN_RATINGS ?= 5000000
+NEUMF_EPOCHS ?= 3
+
 neumf:
-	$(BACKEND) $(PYTHON) -m moviematch.cli train --only neumf
+	$(BACKEND) NEUMF_MAX_TRAIN_RATINGS=$(NEUMF_MAX_TRAIN_RATINGS) NEUMF_EPOCHS=$(NEUMF_EPOCHS) $(PYTHON) -m moviematch.cli train --only neumf --with-validation
 
 evaluate:
 	$(BACKEND) $(PYTHON) -m moviematch.cli evaluate

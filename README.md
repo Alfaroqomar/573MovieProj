@@ -31,7 +31,16 @@ command to run.
 
 ## Setup
 
-### 1. Download MovieLens 32M
+### 1. Get the code
+
+```bash
+git clone https://github.com/Alfaroqomar/573MovieProj.git
+cd 573MovieProj
+```
+
+All commands below run from this folder (the one with `backend/`, `frontend/` and this README).
+
+### 2. Download MovieLens 32M
 
 Download and extract the official ZIP (about 239 MB):
 
@@ -44,7 +53,7 @@ curl -LO https://files.grouplens.org/datasets/movielens/ml-32m.zip
 unzip ml-32m.zip            # creates ml-32m/ with ratings.csv, movies.csv, tags.csv, links.csv
 ```
 
-### 2. Configure
+### 3. Configure
 
 ```bash
 cp .env.example .env
@@ -53,11 +62,12 @@ cp .env.example .env
 Set `MOVIELENS_DATA_PATH` to the **absolute** path of the extracted `ml-32m` folder. All other settings are
 optional. `.env` is git-ignored; never commit it.
 
-### 3. Install
+### 4. Install
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
 pip install -r backend/requirements.txt
+pip install torch            # optional: only needed for the NeuMF baseline
 cd frontend && npm install && cd ..
 ```
 
@@ -72,7 +82,7 @@ Run from the repository root. Each step is separate, so models are never retrain
 | Check readiness | `cd backend && python -m moviematch.cli status` | `make status` |
 | **Preprocess dataset** | `cd backend && python -m moviematch.cli preprocess` | `make preprocess` |
 | **Train models** | `cd backend && python -m moviematch.cli train` | `make train` |
-| Train NeuMF (optional, needs PyTorch) | `cd backend && python -m moviematch.cli train --only neumf` | `make neumf` |
+| Train NeuMF (optional, needs PyTorch) | `cd backend && NEUMF_MAX_TRAIN_RATINGS=5000000 NEUMF_EPOCHS=3 python -m moviematch.cli train --only neumf --with-validation` | `make neumf` |
 | Evaluate (optional) | `cd backend && python -m moviematch.cli evaluate` | `make evaluate` |
 | Export Stage 1 shortlists for the LLM stage | `cd backend && python -m moviematch.cli candidates` | `make candidates` |
 | **Start backend** | `cd backend && python -m uvicorn moviematch.api.main:app --port 8000` | `make backend` |
@@ -96,9 +106,31 @@ peak memory), popularity + Item-KNN + implicit ALS about 1.5 minutes, explicit A
 about 30 ms per user per all models.
 
 **NeuMF** needs PyTorch (`pip install torch`) and is the slowest model. It uses an Apple Silicon or NVIDIA GPU
-when present. For a quick run, train on a sample: `NEUMF_MAX_TRAIN_RATINGS=5000000 NEUMF_EPOCHS=5 python -m
-moviematch.cli train --only neumf`. On 1 million training ratings it reached validation NDCG@10 0.08 in one
-round (110 s on 2 CPU cores).
+when present. Always train it with `--with-validation`: NeuMF only knows users it saw during training, and on the
+date split about 2,600 test users have no ratings before 2020, so without the flag they get the most-rated list
+instead of NeuMF picks. The command above uses a 5-million-rating sample and 3 rounds (about 2.5 minutes on an
+Apple Silicon GPU); set `NEUMF_MAX_TRAIN_RATINGS=0` to use every rating (about 5 minutes per round). With
+`--with-validation` nothing is held out, so the training log prints `validation NDCG@10 0.0000` for every round
+and all rounds run; that is expected.
+
+## Updating an existing copy
+
+After pulling a new version, reinstall and rebuild the saved files. Models and processed data from an older
+version may not load (for example, everything trained before the proposal-alignment update must be redone).
+
+```bash
+git pull
+source .venv/bin/activate                     # Windows: .venv\Scripts\activate
+pip install -r backend/requirements.txt
+cd frontend && npm install && cd ..
+cd backend
+python -m moviematch.cli preprocess
+python -m moviematch.cli train
+NEUMF_MAX_TRAIN_RATINGS=5000000 NEUMF_EPOCHS=3 python -m moviematch.cli train --only neumf --with-validation
+python -m moviematch.cli evaluate
+```
+
+Then restart the backend and frontend. `python -m moviematch.cli status` shows what is still missing.
 
 ## Using an LLM (optional)
 
@@ -319,8 +351,9 @@ directory. It exists only for the tests; the application never uses or falls bac
 - Validation checks the LLM's structure and IDs, not every sentence of its explanations.
 - Tags are community-applied and sparse; many movies have none. Tags are used as content metadata and are not
   split by time.
-- Users with a single rating have nothing in validation or test.
-- NeuMF and other neural models are future work.
+- With the date split, a user appears in validation or test only if they rated movies in 2020 or later. Only
+  165 users have 1 to 10 training ratings (93 of them in the test evaluation), so cold-start results rest on few
+  users and have wide confidence intervals.
 
 ## Data license
 
