@@ -4,9 +4,10 @@ import { ApiError, api, recommend } from "../api/client";
 import type { EvaluationResults, RecommendationMode, RecommendationResponse } from "../api/types";
 import { Alert } from "../components/Alert";
 import { RankShift } from "../components/MovieCard";
+import { EvaluationPanel } from "../components/EvaluationPanel";
 import { UserPicker, UserSummaryCard, useUserSummary } from "../components/UserPicker";
 import { Button, Panel, SectionHeading } from "../components/ui";
-import { MODES, fmtInt, fmtMs } from "../lib/modes";
+import { MODES, fmtMs } from "../lib/modes";
 import { datasetReady, useStatus } from "../lib/status";
 
 type Outcome =
@@ -16,14 +17,7 @@ type Outcome =
   | { kind: "done"; response: RecommendationResponse }
   | { kind: "error"; error: ApiError };
 
-const METRICS = ["precision", "recall", "ndcg", "hitRate", "mrr"] as const;
-const METRIC_LABELS: Record<(typeof METRICS)[number], string> = {
-  precision: "Precision",
-  recall: "Recall",
-  ndcg: "NDCG",
-  hitRate: "HitRate",
-  mrr: "MRR",
-};
+
 
 export function ComparePage() {
   const { status } = useStatus();
@@ -282,52 +276,8 @@ export function ComparePage() {
           <Alert tone="error" title="Could not load evaluation results">{evalError}</Alert>
         ) : !evaluation ? (
           <p className="text-muted" role="status">Loading…</p>
-        ) : !evaluation.available ? (
-          <Alert tone="info" title={evaluation.message ?? "Evaluation not run yet."}>
-            Run the evaluation command in the README to compute Precision, Recall, NDCG, HitRate, and MRR at 10.
-          </Alert>
         ) : (
-          <div className="space-y-3">
-            <div className="overflow-x-auto">
-              <table className="num w-full min-w-[36rem] border-collapse text-sm">
-                <caption className="sr-only">Offline ranking metrics</caption>
-                <thead>
-                  <tr className="text-muted">
-                    <th scope="col" className="p-2 text-left font-normal">Model</th>
-                    {METRICS.map((m) => (
-                      <th key={m} scope="col" className="p-2 text-right font-normal">
-                        {METRIC_LABELS[m]}@{evaluation.k}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {Object.entries(evaluation.models ?? {}).map(([name, metrics]) => (
-                    <tr key={name} className="border-t border-line">
-                      <th scope="row" className="p-2 text-left font-semibold text-paper">
-                        {MODES.find((m) => m.id === name)?.short ?? name}
-                      </th>
-                      {METRICS.map((m) => (
-                        <td key={m} className="p-2 text-right text-paper">
-                          {metrics[`${m}@${evaluation.k}`]?.toFixed(4) ?? "n/a"}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                  {evaluation.notEvaluated?.als_llm ? (
-                    <tr className="border-t border-line">
-                      <th scope="row" className="p-2 text-left font-semibold text-paper">ALS + LLM</th>
-                      <td colSpan={METRICS.length} className="p-2 text-right text-muted">{evaluation.notEvaluated.als_llm}</td>
-                    </tr>
-                  ) : null}
-                </tbody>
-              </table>
-            </div>
-            <p className="measure text-sm text-muted">
-              {fmtInt(evaluation.usersEvaluated ?? 0)} users sampled from {fmtInt(evaluation.eligibleUsers ?? 0)} eligible
-              on the {evaluation.split} split. {evaluation.protocol}
-            </p>
-          </div>
+          <EvaluationPanel evaluation={evaluation} />
         )}
       </section>
     </div>

@@ -11,8 +11,15 @@ export const MODES: Array<{
     id: "popularity",
     label: "Popularity",
     short: "Popularity",
-    description: "Widely rated, well-rated movies you have not rated yet, ranked by a Bayesian weighted average.",
+    description: "The most-rated movies you have not rated yet. The same list for everyone (proposal baseline).",
     colorVar: "var(--color-model-popularity)",
+  },
+  {
+    id: "popularity_weighted",
+    label: "Popularity (weighted)",
+    short: "Pop. weighted",
+    description: "Popular movies ranked by a Bayesian weighted average of their ratings, so well-rated movies rise.",
+    colorVar: "var(--color-model-popularity-weighted)",
   },
   {
     id: "item_knn",
@@ -27,6 +34,27 @@ export const MODES: Array<{
     short: "ALS",
     description: "Matrix factorization learns your taste from all your ratings and scores every unseen movie.",
     colorVar: "var(--color-model-als)",
+  },
+  {
+    id: "als_explicit",
+    label: "ALS (explicit ratings)",
+    short: "ALS explicit",
+    description: "The proposal's ALS: predicts the star rating you would give, then ranks by that prediction.",
+    colorVar: "var(--color-model-als-explicit)",
+  },
+  {
+    id: "neumf",
+    label: "NeuMF",
+    short: "NeuMF",
+    description: "Neural collaborative filtering, the deep-learning baseline. Makes its own list, separate from the pipeline.",
+    colorVar: "var(--color-model-neumf)",
+  },
+  {
+    id: "stage1",
+    label: "Stage 1 (ALS + KNN merged)",
+    short: "Stage 1",
+    description: "The proposal's shortlist: ALS's top 30 and Item-KNN's top 30, merged into 50. Shows the top of that list.",
+    colorVar: "var(--color-model-stage1)",
   },
   {
     id: "als_llm",
@@ -44,14 +72,20 @@ export const STAGE_LABELS: Record<StageName, string> = {
   ranking_popularity: "Ranking popular movies",
   generating_als: "Generating ALS candidates",
   finding_similar: "Finding similar movies",
+  merging_candidates: "Merging ALS and Item-KNN shortlists",
+  scoring_neumf: "Scoring every movie with NeuMF",
   reranking_llm: "Reranking with the LLM",
   validating: "Validating the response",
 };
 
 export const STAGES_BY_MODE: Record<RecommendationMode, StageName[]> = {
   popularity: ["loading_history", "ranking_popularity"],
+  popularity_weighted: ["loading_history", "ranking_popularity"],
   item_knn: ["loading_history", "finding_similar"],
   als: ["loading_history", "generating_als", "finding_similar"],
+  als_explicit: ["loading_history", "generating_als", "finding_similar"],
+  stage1: ["loading_history", "generating_als", "finding_similar", "merging_candidates"],
+  neumf: ["loading_history", "scoring_neumf"],
   als_llm: ["loading_history", "generating_als", "finding_similar", "reranking_llm", "validating"],
 };
 

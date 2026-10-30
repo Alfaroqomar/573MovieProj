@@ -1,6 +1,14 @@
 // Shapes returned by the FastAPI backend (camelCase JSON).
 
-export type RecommendationMode = "popularity" | "item_knn" | "als" | "als_llm";
+export type RecommendationMode =
+  | "popularity"
+  | "popularity_weighted"
+  | "item_knn"
+  | "als"
+  | "als_explicit"
+  | "stage1"
+  | "neumf"
+  | "als_llm";
 
 export interface Movie {
   movieId: number;
@@ -29,6 +37,10 @@ export interface UserSummary {
   userId: number;
   ratingCount: number;
   trainingRatingCount: number;
+  validationRatingCount: number;
+  isColdStart: boolean;
+  coldStartMaxRatings: number;
+  splitMode: "date" | "per_user";
   meanRating: number;
   firstRatingAt: string;
   lastRatingAt: string;
@@ -64,6 +76,11 @@ export interface Recommendation {
   strongestKnnSimilarity?: number | null;
   knnEvidence?: KnnEvidence[] | null;
   llmRelevanceScore?: number | null;
+  predictedRating?: number | null;
+  mergedScore?: number | null;
+  knnRank?: number | null;
+  candidateSource?: "both" | "als" | "knn" | "als_top_up" | null;
+  neumfScore?: number | null;
   popularityScore?: number | null;
   ratingCount?: number | null;
   meanRating?: number | null;
@@ -84,6 +101,8 @@ export interface RecommendationResponse {
   userId: number;
   topN: number;
   candidateCount?: number | null;
+  candidateSources?: Record<string, number> | null;
+  knnScoring?: string | null;
   recommendations: Recommendation[];
   usedFallback: boolean;
   fallbackLabel?: string | null;
@@ -114,7 +133,7 @@ export interface ConfigStatus {
   rawDataset: { configured: boolean; found: boolean; problem: string | null };
   processed: boolean;
   processedProblem: string | null;
-  models: Record<RecommendationMode, boolean>;
+  models: Partial<Record<RecommendationMode, boolean>>;
   modes: Record<RecommendationMode, boolean>;
   defaultMode: RecommendationMode;
   llm: {
@@ -147,11 +166,19 @@ export interface DatasetStatistics {
   lastRatingAt: string;
   medianRatingsPerUser: number;
   split: { train: number; validation: number; test: number };
+  splitDetails?: {
+    usersWithoutTrainingRatings: number;
+    coldStartUsers: number;
+    moviesWithTrainingRatings: number;
+  };
   genres: Record<string, number>;
   mostRatedMovies: Array<Movie & { ratingCount: number }>;
   processedAt: string;
   matchesPublishedMl32mCounts: boolean;
 }
+
+export type MetricRow = Record<string, number>;
+export type EvaluationGroup = "all" | "cold_start" | "regular";
 
 export interface EvaluationResults {
   available: boolean;
@@ -159,10 +186,24 @@ export interface EvaluationResults {
   split?: string;
   k?: number;
   usersEvaluated?: number;
+  coldStartExtraUsers?: number;
   eligibleUsers?: number;
+  eligibleColdStartUsers?: number;
+  groupSizes?: Record<EvaluationGroup, number>;
+  coldStartDefinition?: string;
   relevanceThreshold?: number;
   protocol?: string;
-  models?: Record<string, Record<string, number>>;
+  modelLabels?: Record<string, string>;
+  models?: Record<string, MetricRow>;
+  groups?: Record<EvaluationGroup, Record<string, MetricRow>>;
+  confidence?: Partial<Record<EvaluationGroup, Record<string, Record<string, [number, number]>>>>;
+  pairedNdcgVsAls?: Record<string, { meanDifference: number; low: number; high: number }>;
+  historyBuckets?: Record<string, { users: number; models: Record<string, MetricRow> }>;
+  relevantUnreachable?: Partial<Record<EvaluationGroup, number | null>>;
+  meanLatencyMs?: Record<string, number>;
+  neumfFallbackUsers?: number | null;
+  skippedModels?: Record<string, string>;
+  trainedOn?: Record<string, string>;
   notEvaluated?: Record<string, string>;
   createdAt?: string;
 }
@@ -172,6 +213,8 @@ export type StageName =
   | "ranking_popularity"
   | "generating_als"
   | "finding_similar"
+  | "merging_candidates"
+  | "scoring_neumf"
   | "reranking_llm"
   | "validating";
 

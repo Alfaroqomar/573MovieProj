@@ -9,5 +9,8 @@ implicit>=0.7.2
 httpx>=0.27
 python-dotenv>=1.0
 
+# optional: NeuMF baseline (`pip install torch`)
+# torch>=2.2
+
 # development
 pytest>=8

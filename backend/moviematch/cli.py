@@ -2,8 +2,10 @@
 
     python -m moviematch.cli status       # report readiness
     python -m moviematch.cli preprocess   # MovieLens CSVs -> processed artifacts
-    python -m moviematch.cli train        # train popularity, item-KNN, ALS
+    python -m moviematch.cli train        # popularity, item-KNN, ALS (implicit + explicit)
+    python -m moviematch.cli train --only neumf   # NeuMF (needs PyTorch)
     python -m moviematch.cli evaluate     # offline metrics on the test split
+    python -m moviematch.cli candidates   # Stage 1 shortlists for the LLM stage
 """
 
 from __future__ import annotations
@@ -35,11 +37,22 @@ def _cmd_preprocess(_: argparse.Namespace) -> int:
 
 
 def _cmd_train(args: argparse.Namespace) -> int:
-    from moviematch.models.training import NotPreprocessedError, train_models
+    from moviematch.models.training import MissingDependencyError, NotPreprocessedError, train_models
 
     try:
-        train_models(get_settings(), only=args.only)
-    except NotPreprocessedError as exc:
+        train_models(get_settings(), only=args.only, with_validation=args.with_validation)
+    except (NotPreprocessedError, MissingDependencyError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
+def _cmd_candidates(args: argparse.Namespace) -> int:
+    from moviematch.models.candidates import export_candidates
+
+    try:
+        export_candidates(get_settings(), split_name=args.split, n_users=args.users)
+    except (FileNotFoundError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     return 0
@@ -70,7 +83,15 @@ def main(argv: list[str] | None = None) -> int:
 
     train = sub.add_parser("train", help="Train and save recommendation models")
     train.add_argument(
-        "--only", nargs="+", choices=["popularity", "knn", "als"], help="Train only these models"
+        "--only",
+        nargs="+",
+        choices=["popularity", "knn", "als", "als_explicit", "neumf"],
+        help="Train only these models (default: popularity knn als als_explicit)",
+    )
+    train.add_argument(
+        "--with-validation",
+        action="store_true",
+        help="Fit on train + validation (use for the final test-set run)",
     )
     train.set_defaults(func=_cmd_train)
 
@@ -79,6 +100,11 @@ def main(argv: list[str] | None = None) -> int:
     evaluate.add_argument("--k", type=int, default=10)
     evaluate.add_argument("--users", type=int, default=None, help="Number of users to sample")
     evaluate.set_defaults(func=_cmd_evaluate)
+
+    candidates = sub.add_parser("candidates", help="Export Stage 1 shortlists for the LLM stage")
+    candidates.add_argument("--split", choices=["test", "validation"], default="test")
+    candidates.add_argument("--users", type=int, default=500)
+    candidates.set_defaults(func=_cmd_candidates)
 
     args = parser.parse_args(argv)
     return int(args.func(args))

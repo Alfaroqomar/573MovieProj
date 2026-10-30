@@ -3,14 +3,16 @@ from __future__ import annotations
 import json
 
 import numpy as np
+import pytest
 import scipy.sparse as sp
 
 from moviematch.data.paths import model_paths, processed_paths
 from moviematch.models.als import AlsModel
 from moviematch.models.common import top_k, user_row
-from moviematch.models.evaluation import evaluate, ranking_metrics
+from moviematch.models.evaluation import coverage, evaluate, gini, ranking_metrics, serendipity
 from moviematch.models.item_knn import ItemKnnModel
 from moviematch.models.popularity import PopularityModel
+from moviematch.models.stage1 import merge_candidates
 
 
 def test_top_k_excludes_and_orders():
@@ -78,8 +80,98 @@ def test_ranking_metrics():
 def test_evaluation_writes_real_results(prepared):
     results = evaluate(prepared, log=lambda _: None)
     assert results["available"] and results["usersEvaluated"] > 0
-    assert set(results["models"]) == {"popularity", "item_knn", "als"}
+    assert {"popularity", "popularity_weighted", "item_knn", "item_knn_sum", "als", "als_explicit", "stage1"} <= set(results["models"])
     for metrics in results["models"].values():
         assert 0.0 <= metrics["precision@10"] <= 1.0
+        assert 0.0 <= metrics["coverage@10"] <= 1.0
+        assert 0.0 <= metrics["gini@10"] <= 1.0
+        assert metrics["recall@50"] >= metrics["recall@10"]
+        assert 0.0 <= metrics["serendipity@10"] <= metrics["precision@10"] + 1e-9
+    assert set(results["groups"]) == {"all", "cold_start", "regular"}
+    validation = evaluate(prepared, split_name="validation", log=lambda _: None)
+    assert validation["groupSizes"]["cold_start"] > 0
+    assert validation["groups"]["cold_start"]["als"]["ndcg@10"] >= 0
+    lo, hi = results["confidence"]["all"]["als"]["ndcg@10"]
+    assert lo <= results["models"]["als"]["ndcg@10"] <= hi
+    assert (prepared.evaluation_dir / "results_test_all.csv").exists()
     saved = json.loads((prepared.evaluation_dir / "results.json").read_text())
-    assert saved["models"] == results["models"]
+    assert saved["split"] == "validation"  # the last run wins
+
+
+# --------------------------------------------------------------------------- #
+# Proposal-aligned models and metrics
+# --------------------------------------------------------------------------- #
+
+
+
+def test_gini_coverage_serendipity():
+    assert gini(np.array([5, 5, 5, 5])) == 0.0
+    assert gini(np.array([0, 0, 0, 20])) == 0.75  # (n-1)/n for one movie taking everything
+    assert gini(np.zeros(4)) == 0.0
+    assert coverage(np.array([0, 1, 0, 3])) == 0.5
+    ranked = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    assert serendipity(ranked, relevant={1, 2, 3}, obvious={1}, k=10) == 0.2
+
+
+def test_popularity_count_rule(prepared):
+    model = PopularityModel.load(model_paths(prepared).popularity, "count")
+    counts = model.counts[model.order]
+    assert (np.diff(counts) <= 0).all()  # most-rated first
+    history, _ = _user(prepared)
+    recs = model.ranking(history, 10)
+    assert len(recs) == 10 and not set(recs.tolist()) & set(history.tolist())
+
+
+def test_knn_average_matches_formula():
+    # Movie 2's neighbours: movie 0 (sim 0.5) and movie 1 (sim 1.0).
+    sim = sp.csr_matrix(np.array([
+        [0.0, 0.0, 0.5, 0.2],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.5, 1.0, 0.0, 0.0],
+        [0.2, 0.0, 0.0, 0.0],
+    ], dtype=np.float32))
+    model = ItemKnnModel(sim, 4.0, scoring="average", min_support=2)
+    scores = model.scores(np.array([0, 1]), np.array([4.0, 1.0], dtype=np.float32))
+    assert abs(scores[2] - (0.5 * 4 + 1.0 * 1) / 1.5) < 1e-2  # weighted average = 2.0 (+ tiny tie-break)
+    assert scores[3] == -np.inf  # only one neighbour in history: below min support
+
+
+def test_explicit_als(prepared):
+    from moviematch.models.als_explicit import ExplicitAlsModel
+
+    mp = model_paths(prepared)
+    meta = json.loads(mp.als_explicit_meta.read_text())
+    assert meta["trainRmse"][-1] < meta["trainRmse"][0]
+    model = ExplicitAlsModel.load(mp.als_explicit, mp.als_explicit_meta)
+    history, ratings = _user(prepared)
+    pool = model.candidates(history, ratings, 20)
+    assert len(pool) == 20 and not {c.movie_idx for c in pool} & set(history.tolist())
+
+
+def test_stage1_merge_rules():
+    als = np.array([10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0.0])
+    knn = np.array([0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 4.0])
+    knn[knn == 0] = -np.inf
+    pool = merge_candidates(als, knn, history=np.array([0]), per_model=3, pool_size=6, top_up=True)
+    ids = [c.movie_idx for c in pool]
+    assert 0 not in ids and len(pool) == 6
+    sources = {c.movie_idx: c.source for c in pool}
+    assert sources[1] == "als" and sources[9] == "knn" and sources[10] == "knn"
+    assert [c.rank for c in pool] == list(range(1, 7))
+    assert sum(1 for c in pool if c.source == "als_top_up") == 6 - 5
+    merged = [c.merged_score for c in pool]
+    assert merged == sorted(merged, reverse=True)
+    both = merge_candidates(np.array([3.0, 2, 1]), np.array([1.0, 3, 2]), np.array([], int), 2, 3, False)
+    assert {c.source for c in both} >= {"both"}
+
+
+def test_neumf_trained(prepared):
+    pytest.importorskip("torch")
+    from moviematch.models.neumf import NeuMFModel
+
+    mp = model_paths(prepared)
+    model = NeuMFModel.load(mp.neumf, mp.neumf_meta)
+    history, _ = _user(prepared)
+    scores = model.scores(5)
+    picks = top_k(scores, 10, exclude=history)
+    assert len(picks) == 10 and not set(picks.tolist()) & set(history.tolist())

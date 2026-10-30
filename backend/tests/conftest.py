@@ -44,24 +44,37 @@ def write_synthetic_movielens(root: Path, n_users: int = 300, n_movies: int = 40
     (root / "links.csv").write_text("\n".join(lines) + "\n")
 
     lines = ["userId,movieId,rating,timestamp"]
-    t0 = 1_000_000_000
+    t_2015 = 1_420_070_400  # 2015-01-01
+    year = 365 * 86_400
     for u in range(n_users):
         favourite = u % len(GENRES)
-        count = int(rng.integers(20, 60))
+        # Most users have plenty of ratings; every 15th user is "cold" (few
+        # ratings before 2020, the rest after), so the date split produces a
+        # cold-start group.
+        cold = u % 15 == 0
+        count = int(rng.integers(20, 30)) if cold else int(rng.integers(20, 60))
         weights = np.where(movie_genre == favourite, 8.0, 1.0)
         weights /= weights.sum()
         movies = rng.choice(n_movies, size=count, replace=False, p=weights)
-        times = np.sort(rng.integers(0, 10_000_000, size=count)) + t0
+        if cold:
+            times = np.sort(np.concatenate([
+                rng.integers(t_2015 + 4 * year, t_2015 + 5 * year - 86_400, size=5),
+                rng.integers(t_2015 + 5 * year + 86_400, t_2015 + 8 * year, size=count - 5),
+            ]))
+        else:
+            start = t_2015 + int(rng.integers(0, 3 * year))
+            times = np.sort(rng.integers(start, t_2015 + 8 * year + 200 * 86_400, size=count))
         for m, t in zip(movies, times):
             rating = 4.5 if movie_genre[m] == favourite else float(rng.choice([2.0, 3.0, 3.5]))
             lines.append(f"{u + 1},{m + 1},{rating},{t}")
     # Rows the preprocessor must clean up.
-    lines.append("1,1,7.0,1000000001")  # rating out of range
-    lines.append("2,99999,4.0,1000000002")  # unknown movie
-    lines.append("3,2,,1000000003")  # missing rating
+    lines.append("1,1,7.0,1500000001")  # rating out of range
+    lines.append("2,99999,4.0,1500000002")  # unknown movie
+    lines.append("3,2,,1500000003")  # missing rating
     lines.append(lines[1])  # exact duplicate of the first rating
     (root / "ratings.csv").write_text("\n".join(lines) + "\n")
 
+    t0 = t_2015
     lines = ["userId,movieId,tag,timestamp"]
     for m in range(0, n_movies, 3):
         lines.append(f"1,{m + 1},Mind-Bending ,{t0}")
@@ -93,7 +106,15 @@ def make_settings(tmp: Path, data: Path | None, **llm: object) -> Settings:
         knn_neighbors=20,
         als_factors=16,
         als_iterations=8,
+        als_explicit_factors=8,
+        als_explicit_iterations=4,
+        neumf_gmf_dim=8,
+        neumf_mlp_layers=(16, 8),
+        neumf_epochs=2,
+        neumf_batch_size=1024,
         eval_sample_users=200,
+        eval_cold_start_extra=50,
+        eval_bootstrap=50,
     )
 
 
@@ -108,6 +129,12 @@ def prepared(tmp_path_factory) -> Settings:
     settings = make_settings(tmp, data)
     preprocess(settings, log=lambda _: None)
     train_models(settings, log=lambda _: None)
+    try:
+        import torch  # noqa: F401
+
+        train_models(settings, only=["neumf"], log=lambda _: None)
+    except ImportError:
+        pass
     return settings
 
 

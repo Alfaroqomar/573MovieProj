@@ -1,6 +1,14 @@
-"""Popularity baseline.
+"""Popularity baselines.
 
-Score (a Bayesian / IMDb-style weighted rating), computed on the TRAINING split:
+Two rules, both computed on the TRAINING data and both non-personalised
+(the same list for everyone, minus movies the user has already rated):
+
+* ``count`` (the proposal's baseline, mode ``popularity``): movies ranked by
+  number of training ratings; ties broken by mean rating, then movie index.
+* ``weighted`` (mode ``popularity_weighted``): the Bayesian weighted rating
+  below.
+
+Weighted score (a Bayesian / IMDb-style weighted rating):
 
     WR(i) = v_i / (v_i + m) * R_i  +  m / (v_i + m) * C
 
@@ -51,8 +59,11 @@ def fit_popularity(train: sp.csr_matrix, min_votes_quantile: float) -> dict[str,
     eligible = ranked(np.flatnonzero(counts >= m))
     remainder = ranked(np.flatnonzero(rated & (counts < m)))
     order = np.concatenate((eligible, remainder))
+    rated_items = np.flatnonzero(rated)
+    count_order = rated_items[np.lexsort((rated_items, -means[rated_items], -counts[rated_items]))]
     return {
         "order": order.astype(np.int32),
+        "count_order": count_order.astype(np.int32),
         "weighted_rating": weighted.astype(np.float32),
         "counts": counts.astype(np.int32),
         "means": means.astype(np.float32),
@@ -69,8 +80,13 @@ def save_popularity(arrays: dict[str, np.ndarray], path: Path) -> None:
 
 
 class PopularityModel:
-    def __init__(self, arrays: dict[str, np.ndarray]):
-        self.order = arrays["order"]
+    RULES = ("count", "weighted")
+
+    def __init__(self, arrays: dict[str, np.ndarray], rule: str = "weighted"):
+        if rule not in self.RULES:
+            raise ValueError(f"Unknown popularity rule {rule}")
+        self.rule = rule
+        self.order = arrays["count_order"] if rule == "count" else arrays["order"]
         self.weighted_rating = arrays["weighted_rating"]
         self.counts = arrays["counts"]
         self.means = arrays["means"]
@@ -80,9 +96,26 @@ class PopularityModel:
         self.eligible_count = int(arrays["eligible_count"])
 
     @classmethod
-    def load(cls, path: Path) -> PopularityModel:
+    def load(cls, path: Path, rule: str = "weighted") -> PopularityModel:
         with np.load(path) as data:
-            return cls({key: data[key] for key in data.files})
+            arrays = {key: data[key] for key in data.files}
+        if rule == "count" and "count_order" not in arrays:
+            raise FileNotFoundError("Popularity model predates the most-rated rule; retrain it.")
+        return cls(arrays, rule)
+
+    def ranking(self, exclude: np.ndarray, n: int) -> np.ndarray:
+        """Movie indices only (fast path used by evaluation)."""
+        if len(exclude) == 0:
+            return self.order[:n].astype(np.int64)
+        excluded = np.zeros(len(self.counts), dtype=bool)
+        excluded[exclude] = True
+        out = []
+        for idx in self.order:
+            if not excluded[idx]:
+                out.append(int(idx))
+                if len(out) >= n:
+                    break
+        return np.asarray(out, dtype=np.int64)
 
     def recommend(self, exclude: np.ndarray, n: int) -> list[PopularityItem]:
         excluded = set(int(i) for i in exclude)
@@ -104,7 +137,10 @@ class PopularityModel:
         return items
 
     def describe(self) -> dict[str, object]:
+        if self.rule == "count":
+            return {"formula": "rank by number of training ratings", "rule": "count"}
         return {
+            "rule": "weighted",
             "formula": "WR = v/(v+m)*R + m/(v+m)*C",
             "globalMeanC": round(self.global_mean, 4),
             "minVotesM": round(self.min_votes, 1),

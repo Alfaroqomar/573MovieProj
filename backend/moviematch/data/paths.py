@@ -7,7 +7,7 @@ from pathlib import Path
 
 from moviematch.config import Settings
 
-ARTIFACT_FORMAT_VERSION = 1
+ARTIFACT_FORMAT_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -43,6 +43,10 @@ class ProcessedPaths:
         return self.root / "user_top_movies.parquet"
 
     @property
+    def user_recent_movies(self) -> Path:
+        return self.root / "user_recent_movies.parquet"
+
+    @property
     def train_matrix(self) -> Path:
         return self.root / "train_matrix.npz"
 
@@ -59,6 +63,7 @@ class ProcessedPaths:
             self.ratings,
             self.users,
             self.user_top_movies,
+            self.user_recent_movies,
             self.train_matrix,
             self.full_matrix,
         ]
@@ -89,6 +94,26 @@ class ModelPaths:
         return self.root / "als.json"
 
     @property
+    def als_explicit(self) -> Path:
+        return self.root / "als_explicit_factors.npz"
+
+    @property
+    def als_explicit_meta(self) -> Path:
+        return self.root / "als_explicit.json"
+
+    @property
+    def neumf(self) -> Path:
+        return self.root / "neumf.pt"
+
+    @property
+    def neumf_support(self) -> Path:
+        return self.root / "neumf.support.npz"
+
+    @property
+    def neumf_meta(self) -> Path:
+        return self.root / "neumf.json"
+
+    @property
     def training_manifest(self) -> Path:
         return self.root / "training_manifest.json"
 
@@ -103,3 +128,7 @@ def model_paths(settings: Settings) -> ModelPaths:
 
 def evaluation_results_path(settings: Settings) -> Path:
     return settings.evaluation_dir / "results.json"
+
+
+def candidates_dir(settings: Settings) -> Path:
+    return settings.artifacts_dir / "candidates"

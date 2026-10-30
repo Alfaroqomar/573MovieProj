@@ -4,7 +4,7 @@
 PYTHON ?= python3
 BACKEND = cd backend &&
 
-.PHONY: install install-backend install-frontend status preprocess train evaluate backend frontend test build
+.PHONY: install install-backend install-frontend status preprocess train neumf evaluate candidates backend frontend test build
 
 install: install-backend install-frontend
 
@@ -23,8 +23,14 @@ preprocess:
 train:
 	$(BACKEND) $(PYTHON) -m moviematch.cli train
 
+neumf:
+	$(BACKEND) $(PYTHON) -m moviematch.cli train --only neumf
+
 evaluate:
 	$(BACKEND) $(PYTHON) -m moviematch.cli evaluate
+
+candidates:
+	$(BACKEND) $(PYTHON) -m moviematch.cli candidates
 
 backend:
 	$(BACKEND) $(PYTHON) -m uvicorn moviematch.api.main:app --host 127.0.0.1 --port 8000

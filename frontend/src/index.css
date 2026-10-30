@@ -22,8 +22,12 @@
   --color-rose: #e48aa3;         /* burgundy tint for text/focus on charcoal */
 
   --color-model-popularity: #9fb3c8;
+  --color-model-popularity-weighted: #c7d3df;
   --color-model-knn: #a9c08f;
   --color-model-als: #d8b878;
+  --color-model-als-explicit: #b8956a;
+  --color-model-neumf: #b9a6dc;
+  --color-model-stage1: #7cc4bd;
   --color-model-llm: #e48aa3;
 
   --color-ok: #9cc79a;

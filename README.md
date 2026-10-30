@@ -72,7 +72,9 @@ Run from the repository root. Each step is separate, so models are never retrain
 | Check readiness | `cd backend && python -m moviematch.cli status` | `make status` |
 | **Preprocess dataset** | `cd backend && python -m moviematch.cli preprocess` | `make preprocess` |
 | **Train models** | `cd backend && python -m moviematch.cli train` | `make train` |
+| Train NeuMF (optional, needs PyTorch) | `cd backend && python -m moviematch.cli train --only neumf` | `make neumf` |
 | Evaluate (optional) | `cd backend && python -m moviematch.cli evaluate` | `make evaluate` |
+| Export Stage 1 shortlists for the LLM stage | `cd backend && python -m moviematch.cli candidates` | `make candidates` |
 | **Start backend** | `cd backend && python -m uvicorn moviematch.api.main:app --port 8000` | `make backend` |
 | **Start frontend** | `cd frontend && npm run dev` | `make frontend` |
 | Backend tests | `cd backend && python -m pytest` | `make test` |
@@ -82,13 +84,21 @@ Then open http://localhost:5173. The Vite dev server proxies `/api` to the backe
 
 Useful options:
 
-- `train --only als` (or `popularity`, `knn`) retrains a single model.
-- `evaluate --split validation` evaluates on the validation split (for tuning); `--users 2000` changes the
+- `train --only als` (or `popularity`, `knn`, `als_explicit`, `neumf`) retrains a single model.
+- `train --with-validation` fits on train + validation; use it for the final test-set numbers after tuning.
+- `evaluate --split validation` evaluates on the validation period (for tuning); `--users 2000` changes the
   sample size; `--k 20` changes the cutoff.
+- `candidates --users 500` sets how many test users get a 50-movie shortlist file.
 - Restart the backend after preprocessing or training so it loads the new artifacts.
 
-Rough timings on a laptop: preprocessing a few minutes, training a few minutes (ALS dominates), evaluation of
-10,000 users about a minute.
+Measured on MovieLens 32M (2-core cloud machine; a laptop is usually faster): preprocessing 50 s (3.8 GB
+peak memory), popularity + Item-KNN + implicit ALS about 1.5 minutes, explicit ALS about 5 minutes, evaluation
+about 30 ms per user per all models.
+
+**NeuMF** needs PyTorch (`pip install torch`) and is the slowest model. It uses an Apple Silicon or NVIDIA GPU
+when present. For a quick run, train on a sample: `NEUMF_MAX_TRAIN_RATINGS=5000000 NEUMF_EPOCHS=5 python -m
+moviematch.cli train --only neumf`. On 1 million training ratings it reached validation NDCG@10 0.08 in one
+round (110 s on 2 CPU cores).
 
 ## Using an LLM (optional)
 
@@ -118,44 +128,74 @@ name. If the LLM is not configured, the **ALS + LLM Reranking** option is disabl
 3. Deduplicates: repeated (user, movie) ratings keep the most recent; tags are normalized (trimmed,
    lower-cased) and deduplicated per user.
 4. Maps user and movie IDs to contiguous internal indices (every movie in `movies.csv` gets one).
-5. Sorts each user's ratings by timestamp (ties broken by movie ID) and splits them chronologically:
-   earliest 80% → train, next 10% → validation, latest 10% → test (at least one training rating per user).
-6. Writes Parquet tables (movies, ratings with split labels, users, user top movies, aggregated tags),
-   sparse matrices (`train_matrix.npz`, `full_matrix.npz`), `statistics.json`, and `manifest.json` with the
-   dataset version, source file sizes, cleaning report, and configuration.
+5. Splits by **date**, as in the proposal (`SPLIT_MODE=date`, the default): ratings before 2020-01-01 →
+   train, 2020-01-01 to 2021-12-31 → validation, 2022-01-01 onward → test (`SPLIT_VALIDATION_START`,
+   `SPLIT_TEST_START`). `SPLIT_MODE=per_user` keeps the earlier per-user 80/10/10 split.
+6. Marks **cold-start users**: 1 to `COLD_START_MAX_RATINGS` (10) training ratings, as the proposal defines.
+7. Writes Parquet tables (movies, ratings with split labels, users, top-rated and 5 most recent movies per
+   user, aggregated tags), sparse matrices, `statistics.json` (including split details), and `manifest.json`.
+
+On MovieLens 32M the date split gives 27.4M train / 2.9M validation / 1.7M test ratings (85 / 9 / 5%, not the
+80 / 10 / 10 the proposal estimated). 21,529 users have no ratings before 2020 and only 165 users are
+cold-start by the proposal's definition, because every MovieLens user has at least 20 ratings in total.
 
 Titles are displayed as `The Matrix` / `1999` rather than `Matrix, The (1999)`; the raw title is kept too.
 
 ### Models (`backend/moviematch/models/`)
 
-All models are trained on the **training split only**. Validation and test ratings never reach training.
+By default every model is fitted on the **training period only** (`train --with-validation` adds the
+validation period for final test runs). Test ratings never reach any model.
 
-**Popularity.** Bayesian weighted rating on training ratings:
+**Popularity (`popularity.py`).** Two rules. *Most-rated* (the proposal's baseline, mode `popularity`): movies
+by number of training ratings. *Weighted* (mode `popularity_weighted`): the Bayesian weighted rating
 
 ```text
 WR(i) = v_i / (v_i + m) · R_i + m / (v_i + m) · C
 ```
 
-`v_i` = training ratings for movie *i*, `R_i` = its mean training rating, `C` = mean of all training ratings,
-`m` = the 90th percentile of `v_i` over rated movies (`POPULARITY_MIN_VOTES_QUANTILE`). Movies with
-`v_i ≥ m` are ranked first by WR; the remaining rated movies follow so very active users still get results.
-Movies the user has rated are skipped.
+`v_i` = training ratings for movie *i*, `R_i` = its mean, `C` = mean of all training ratings, `m` = the 90th
+percentile of `v_i` (`POPULARITY_MIN_VOTES_QUANTILE`).
 
-**Item-KNN.** Cosine similarity between movies' training rating vectors, computed with the sparse,
-multi-threaded all-pairs KNN in the `implicit` library. Only the top `KNN_NEIGHBORS` (50) neighbours per movie
-are stored, so no dense 87,585 × 87,585 matrix is built. Movies with fewer than `KNN_MIN_ITEM_RATINGS` (20)
-training ratings get no neighbours. The matrix is symmetrized (max(S, Sᵀ)) with a zero diagonal. A user's score
-for movie *j* is `Σ r_ui · S[i, j]` over the movies *i* they rated ≥ 4.0 (all rated movies if none). Evidence is
-the highly rated history movies with the largest `S[i, j]`. The KNN score is a raw weighted sum, not a
-probability.
+**Item-KNN (`item_knn.py`).** Cosine similarity between movies' training rating vectors (sparse all-pairs KNN
+from `implicit`), keeping the top `KNN_NEIGHBORS` (50) per movie, so no dense 87,585 × 87,585 matrix is built.
+Two scorings (`KNN_SCORING`):
 
-**ALS.** `implicit`'s conjugate-gradient ALS (64 factors, λ = 0.05, 15 iterations by default). Ratings are
-treated as **implicit feedback**: each rated movie is a positive interaction with confidence
-`c = 1 + ALS_ALPHA · rating` (α = 2.0), so higher ratings weigh more; unrated movies are preference 0 with
-confidence 1. When serving, the user's vector is re-solved from their full rating history with the trained item
-vectors held fixed (no retraining). The top 50 unseen movies form the candidate pool. The displayed **ALS
-score** is min-max normalized across that pool (1.0 = strongest candidate, 0.0 = weakest); the raw dot product
-is also returned. It is a relative score, not a probability.
+- `sum` (default): `Σ r_ui · S[i, j]` over the movies *i* the user rated ≥ 4.0.
+- `average` (the proposal's Eq. 2): `Σ S[i, j] · r_ui / Σ |S[i, j]|` over the user's rated movies among *j*'s
+  neighbours, needing at least `KNN_MIN_SUPPORT` (2) of them; ties broken by total similarity.
+
+The default was chosen on the validation period: on MovieLens 32M, `sum` reached NDCG@10 0.124 and
+`average` 0.022, because averages favour obscure movies with one or two strong neighbours. The evaluation
+always reports both.
+
+**ALS, implicit (`als.py`).** `implicit`'s conjugate-gradient ALS (64 factors, λ = 0.05, 15 iterations). Each
+rated movie is a positive interaction with confidence `c = 1 + ALS_ALPHA · rating`.
+
+**ALS, explicit (`als_explicit.py`, mode `als_explicit`).** The proposal's Eq. 1: squared error on observed
+ratings, with the per-user / per-movie regularisation Spark MLlib uses (ALS-WR), solved in closed form with
+NumPy (no Java or Spark needed). Movies are ranked by predicted star rating. On validation it scored NDCG@10
+0.009 against 0.120 for implicit ALS, the known weakness of rating prediction for top-N lists, so Stage 1 uses
+implicit ALS.
+
+For both ALS models a user's vector is re-solved from their ratings with the movie vectors fixed (no
+retraining). Displayed ALS scores are min-max normalized across the user's candidates: relative, not
+probabilities.
+
+**Stage 1 shortlist (`stage1.py`, mode `stage1`).** The proposal's candidate merging: ALS top 30 ∪ Item-KNN top
+30, each model's scores min-max normalized over its own top 50, averaged when both picked a movie, topped up
+from ALS ranks 31+ to exactly 50 (`STAGE1_PER_MODEL`, `STAGE1_POOL_SIZE`, `STAGE1_TOP_UP`). On validation the
+shortlist holds more of the user's later liked movies (Recall@50 0.132) than ALS alone (0.127).
+
+**NeuMF (`neumf.py`, mode `neumf`).** He et al. (2017): a GMF branch (32-d) and an MLP branch (64 → 32 → 16),
+trained with binary cross-entropy on training ratings plus 4 sampled negatives each, Adam (lr 0.001), early
+stopping on validation NDCG@10. It is an **independent baseline**: it produces its own top-10 lists for the
+same metrics and does not add candidates to Stage 1 or the LLM stage. Users with no training ratings have no
+NeuMF vector; for them the app shows the most-rated list, clearly labelled.
+
+**Shortlist export for the LLM stage (`candidates.py`).** `python -m moviematch.cli candidates` writes
+`artifacts/candidates/test_candidates.parquet` (50 rows per user: movie, merged/ALS/KNN scores and ranks,
+source, KNN evidence, cold-start flag) and `test_users.jsonl` (history size, favourite genres, top-rated and
+5 most recent movies, and the held-out liked movie IDs for scoring).
 
 ### LLM reranking (`backend/moviematch/llm/`)
 
@@ -178,11 +218,25 @@ The LLM never generates candidates and cannot introduce a movie outside the ALS 
 
 ### Evaluation (`backend/moviematch/models/evaluation.py`)
 
-On a fixed-seed sample of users with at least one held-out rating ≥ 4.0: model input = training ratings,
-previously seen movies (train + validation for the test split) excluded, relevant = held-out ratings ≥ 4.0.
-Reports Precision@10, Recall@10, NDCG@10, HitRate@10, MRR@10 and mean latency to
-`artifacts/evaluation/results.json`, which the Compare page displays. Until it is run, the page shows
-“Evaluation not run yet.” ALS + LLM is not evaluated offline (it would need one LLM call per user).
+Every model is scored on the same users. History = ratings before the evaluated period (train for
+`--split validation`, train + validation for `--split test`); history movies are never recommended; relevant =
+ratings ≥ 4.0 in the evaluated period. A fixed-seed sample of `EVAL_SAMPLE_USERS` eligible users is used for
+"all" and "regular" users; up to `EVAL_COLD_START_EXTRA` more cold-start users are added for the cold-start
+group (1–10 history ratings).
+
+| Metric | Meaning |
+|---|---|
+| Precision@10, Recall@10, NDCG@10, HitRate@10, MRR@10 | Standard top-10 accuracy |
+| Recall@50 | Liked movies in the top 50: for Stage 1, the ceiling for the LLM reranker |
+| Coverage@10 | Share of the catalog (movies with earlier ratings) appearing in any top 10 |
+| Gini@10 | How unevenly recommendations are spread over the catalog (0 even, 1 concentrated) |
+| Serendipity@10 | Liked picks that are not in the 50 most-rated unseen movies, ÷ 10 (Ge et al., 2010) |
+| Novelty@10 | Mean −log2(share of users who rated the movie) |
+
+Results are written to `artifacts/evaluation/results.json` (shown on the Compare page, by user group) and
+`results_<split>_<group>.csv` (for report tables), with 95% bootstrap intervals for NDCG@10 and Recall@10, paired
+NDCG@10 differences against implicit ALS, and NDCG@10 by history length. `evaluate(..., rerank_hook=...)`
+scores a reranker over the Stage 1 shortlist with the same protocol; this is how the LLM stage is evaluated.
 
 ## API
 
@@ -246,11 +300,13 @@ Makefile                shortcuts for the commands above
 
 ## Testing
 
-`cd backend && python -m pytest` runs 35 tests covering: the chronological split (no train/validation/test
-time overlap), row cleaning and deduplication, exclusion of already-rated movies in all three models, ALS score
-normalization, evaluation metrics, every LLM validation rule, the one-retry-then-fallback behaviour, timeouts,
-that the LLM receives exactly the ALS top-50, that secrets are not sent or echoed, readiness states, and the
-streaming endpoints.
+`cd backend && python -m pytest` runs 48 tests covering: the date split boundaries and the per-user split, the
+cold-start flag, row cleaning and deduplication, exclusion of already-rated movies in every model, the
+proposal's Item-KNN formula on a hand-worked example, explicit ALS lowering its error, the Stage 1 merge rules
+(top 30 + top 30, averaging, top-up to 50), NeuMF training and serving (skipped without PyTorch), Gini,
+coverage and serendipity on hand-worked values, the full evaluation output, the shortlist export, every LLM
+validation rule, the one-retry-then-fallback behaviour, timeouts, that the LLM receives exactly the ALS
+top-50, that secrets are not sent or echoed, readiness states, and the streaming endpoints.
 
 The tests generate a small, clearly synthetic dataset in the MovieLens file format inside a temporary
 directory. It exists only for the tests; the application never uses or falls back to it.

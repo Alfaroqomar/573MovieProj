@@ -29,7 +29,10 @@ def test_status_dataset_unavailable(tmp_path):
     with client_for(make_settings(tmp_path, None)) as client:
         status = client.get("/api/config/status").json()
         assert status["state"] == "dataset_unavailable"
-        assert status["modes"] == {"popularity": False, "item_knn": False, "als": False, "als_llm": False}
+        assert not any(status["modes"].values())
+        assert set(status["modes"]) == {
+            "popularity", "popularity_weighted", "item_knn", "als", "als_explicit", "stage1", "neumf", "als_llm",
+        }
         assert any("MOVIELENS_DATA_PATH" in m["action"] for m in status["messages"])
         assert client.get("/api/dataset/statistics").status_code == 503
         r = client.post("/api/recommendations/als", json={"userId": 1})
@@ -189,3 +192,41 @@ def test_retrained_artifacts_need_restart(prepared, tmp_path):
     shutil.copytree(prepared.processed_dir, settings.processed_dir)
     with client_for(settings) as client:
         assert client.get("/api/config/status").json()["state"] == "models_not_trained"
+
+
+@pytest.mark.parametrize("endpoint,mode", [
+    ("popularity-weighted", "popularity_weighted"), ("als-explicit", "als_explicit"), ("stage1", "stage1"),
+])
+def test_new_modes_exclude_rated(prepared, endpoint, mode):
+    with client_for(prepared) as client:
+        summary = client.get("/api/users/5/summary").json()
+        assert summary["splitMode"] == "date" and "isColdStart" in summary
+        data = client.post(f"/api/recommendations/{endpoint}", json={"userId": 5, "topN": 10}).json()
+    assert data["mode"] == mode and len(data["recommendations"]) == 10
+    assert [r["finalRank"] for r in data["recommendations"]] == list(range(1, 11))
+    top_ids = {m["movieId"] for m in summary["highlyRatedMovies"]}
+    assert not top_ids & {r["movie"]["movieId"] for r in data["recommendations"]}
+    if mode == "stage1":
+        assert data["candidateCount"] == 50
+        assert all(r["candidateSource"] in {"both", "als", "knn", "als_top_up"} for r in data["recommendations"])
+
+
+def test_neumf_mode(prepared):
+    pytest.importorskip("torch")
+    with client_for(prepared) as client:
+        assert client.get("/api/config/status").json()["modes"]["neumf"] is True
+        data = client.post("/api/recommendations/neumf", json={"userId": 5, "topN": 5}).json()
+    assert data["mode"] == "neumf" and len(data["recommendations"]) == 5
+
+
+def test_candidates_export(prepared):
+    import pandas as pd
+
+    from moviematch.models.candidates import export_candidates
+
+    summary = export_candidates(prepared, "test", n_users=20, log=lambda _: None)
+    frame = pd.read_parquet(summary["candidates"])
+    assert {"user_id", "rank", "movie_id", "merged_score", "source", "knn_evidence", "is_cold_start"} <= set(frame.columns)
+    assert frame.groupby("user_id")["rank"].max().max() == 50
+    lines = [json.loads(line) for line in open(summary["userFile"])]
+    assert len(lines) == summary["users"] and all(len(u["recent_5"]) <= 5 for u in lines)
