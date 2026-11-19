@@ -39,7 +39,7 @@ export function RecommendationsPage() {
   const { summary, error: summaryError, loading: summaryLoading } = useUserSummary(userId);
   const ready = datasetReady(status);
 
-  // Default mode: ALS + LLM when configured, otherwise ALS.
+  // Default mode: Stage 1 + LLM when configured, otherwise ALS.
   useEffect(() => {
     if (status && mode === null) setMode(status.defaultMode);
   }, [status, mode]);
@@ -155,7 +155,7 @@ export function RecommendationsPage() {
             ))}
           </div>
           {activeMode === "als_llm" ? (
-            <p className="mt-1.5 text-xs text-muted">ALS generates 50 candidates; the LLM returns the top {topN}.</p>
+            <p className="mt-1.5 text-xs text-muted">ALS and Item-KNN build a shortlist; the LLM returns the top {topN}.</p>
           ) : null}
         </fieldset>
 
@@ -175,7 +175,7 @@ export function RecommendationsPage() {
               className="w-full rounded-[var(--radius-control)] border border-line bg-raised px-3 py-2 text-sm text-paper placeholder:text-faint"
             />
             <p id={`${requestId}-help`} className="mt-1 text-xs text-muted">
-              The LLM will only reorder movies already selected by ALS.
+              The LLM will only reorder movies in the Stage 1 shortlist.
             </p>
           </div>
         ) : null}
@@ -270,13 +270,15 @@ function ResultHeader({ result }: { result: RecommendationResponse }) {
         {result.candidateCount
           ? result.mode === "stage1"
             ? `, ${result.candidateCount}-movie shortlist (${result.candidateSources?.both ?? 0} picked by both models)`
-            : `, ${result.candidateCount} ALS candidates`
+            : result.mode === "als_llm"
+              ? `, ${result.candidateCount}-movie shortlist`
+              : `, ${result.candidateCount} ALS candidates`
           : ""}, answered in {fmtMs(result.elapsedMs)}
         {result.llm ? `, ${result.llm.attempts} LLM ${result.llm.attempts === 1 ? "call" : "calls"}` : ""}
       </p>
       {result.usedFallback ? (
-        <Alert tone="warning" title={result.fallbackLabel ?? "ALS fallback because LLM reranking failed."} live>
-          {result.fallbackReason} The list below is the original ALS order.
+        <Alert tone="warning" title={result.fallbackLabel ?? "Stage 1 fallback because LLM reranking failed."} live>
+          {result.fallbackReason} The list below is the original Stage 1 order.
         </Alert>
       ) : null}
       {ir ? (

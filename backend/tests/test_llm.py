@@ -89,6 +89,9 @@ def test_rerank_retries_once_then_succeeds():
     result = rerank(llm, PAYLOAD, 2, GENRES)
     assert result.succeeded and result.attempts == 2
     assert "rejected" in llm.calls[1][-1]["content"]
+    schema = llm.response_formats[0]["json_schema"]["schema"]["properties"]["rankedMovies"]
+    assert schema["minItems"] == schema["maxItems"] == 2
+    assert schema["items"]["properties"]["movieId"]["enum"] == CANDIDATES
 
 
 def test_rerank_falls_back_after_two_failures():

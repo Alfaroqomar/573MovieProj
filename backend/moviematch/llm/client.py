@@ -46,14 +46,16 @@ class OpenAICompatibleClient:
     def model(self) -> str:
         return self._settings.model
 
-    def complete(self, messages: list[dict[str, str]]) -> str:
+    def complete(self, messages: list[dict[str, str]], response_format: dict | None = None) -> str:
         body: dict[str, object] = {
             "model": self._settings.model,
             "messages": messages,
             "temperature": self._settings.temperature,
             "stream": False,
         }
-        if self._settings.json_mode:
+        if self._settings.structured_output and response_format is not None:
+            body["response_format"] = response_format
+        elif self._settings.json_mode:
             body["response_format"] = {"type": "json_object"}
         try:
             response = self._client.post(self._url, json=body)
@@ -74,6 +76,8 @@ class OpenAICompatibleClient:
                 hint = " Check LLM_API_KEY."
             elif response.status_code == 404:
                 hint = " Check LLM_BASE_URL and LLM_MODEL."
+            elif response.status_code == 400 and self._settings.structured_output:
+                hint = " If the provider does not support structured output, set LLM_STRUCTURED_OUTPUT=false."
             elif response.status_code == 400 and self._settings.json_mode:
                 hint = " If the provider does not support JSON mode, set LLM_JSON_MODE=false."
             raise LlmError(

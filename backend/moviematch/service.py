@@ -140,7 +140,7 @@ def readiness(
     if loaded is not None:
         models = {name: bool(models[name] and loaded.get(name, False)) for name in models}
     models["stage1"] = models["als"] and models["item_knn"]
-    models["als_llm"] = models["als"] and settings.llm.configured
+    models["als_llm"] = models["stage1"] and settings.llm.configured
 
     llm = {
         "enabled": settings.llm.enabled,
@@ -566,7 +566,7 @@ class MovieMatchService:
             "als_explicit": ["als_explicit"],
             "stage1": ["als", "item_knn"],
             "neumf": ["neumf"],
-            "als_llm": ["als"],
+            "als_llm": ["als", "item_knn"],
         }[mode]
         for name in required:
             self._require_model(name)
@@ -695,7 +695,7 @@ class MovieMatchService:
                     "usedFallback": False,
                 })
 
-        elif mode == "stage1":
+        elif mode in ("stage1", "als_llm"):
             yield stage("generating_als", "started")
             t0 = time.perf_counter()
             assert self.als is not None and self.knn is not None
@@ -711,9 +711,11 @@ class MovieMatchService:
             t0 = time.perf_counter()
             pool1: list[Stage1Candidate] = merge_candidates(
                 als_scores, knn_scores, history,
-                self.settings.stage1_per_model, self.settings.stage1_pool_size, self.settings.stage1_top_up,
+                self.settings.stage1_per_model,
+                min(candidate_count, self.settings.stage1_pool_size) if mode == "als_llm" else self.settings.stage1_pool_size,
+                self.settings.stage1_top_up,
             )
-            evidence = self.knn.evidence(history, history_ratings, [c.movie_idx for c in pool1[:top_n]])
+            evidence = self.knn.evidence(history, history_ratings, [c.movie_idx for c in pool1])
             timings["merge"] = (time.perf_counter() - t0) * 1000
             response["candidateCount"] = len(pool1)
             response["candidateSources"] = {
@@ -721,7 +723,7 @@ class MovieMatchService:
             }
             yield stage("merging_candidates", "done", candidates=len(pool1))
             per = self.settings.stage1_per_model
-            for c in pool1[:top_n]:
+            def stage1_item(c: Stage1Candidate, final_rank: int) -> dict[str, Any]:
                 ev = self._evidence_out(evidence.get(c.movie_idx, []))
                 where = {
                     "both": f"In both ALS's and Item-KNN's top {per}",
@@ -729,10 +731,11 @@ class MovieMatchService:
                     "knn": f"In Item-KNN's top {per}",
                     "als_top_up": "Added from ALS's next ranks to fill the shortlist",
                 }[c.source]
-                recommendations.append({
+                return {
                     "movie": self.movie_out(c.movie_idx),
                     "mode": mode,
-                    "finalRank": c.rank,
+                    "finalRank": final_rank,
+                    "stage1Rank": c.rank,
                     "mergedScore": round(c.merged_score, 4),
                     "alsScore": None if c.als_score is None else round(c.als_score, 4),
                     "knnScore": None if c.knn_score is None else round(c.knn_score, 4),
@@ -744,7 +747,45 @@ class MovieMatchService:
                     "explanation": (f"{where}; merged score {c.merged_score:.2f}. " + self._evidence_sentence(ev)).strip(),
                     "explanationSource": "template",
                     "usedFallback": False,
-                })
+                }
+
+            if mode == "stage1":
+                recommendations = [stage1_item(c, c.rank) for c in pool1[:top_n]]
+            else:
+                payload = self._llm_payload(u, user_request, pool1, evidence)
+                assert self._llm_client is not None
+                t0 = time.perf_counter()
+                steps = rerank_steps(self._llm_client, payload, top_n, self.genre_vocabulary)
+                while True:
+                    try:
+                        name, status, details = next(steps)
+                    except StopIteration as stop:
+                        result: RerankResult = stop.value
+                        break
+                    yield stage(name, status, **details)
+                timings["llm"] = (time.perf_counter() - t0) * 1000
+                response["llm"] = {"attempts": result.attempts, "model": self.settings.llm.model}
+
+                if result.succeeded:
+                    assert result.output is not None
+                    by_id = {int(self.movie_ids[c.movie_idx]): c for c in pool1}
+                    for ranked in result.output.rankedMovies:
+                        item = stage1_item(by_id[ranked.movieId], ranked.rank)
+                        item["llmRelevanceScore"] = round(ranked.llmRelevanceScore, 4)
+                        item["explanation"] = ranked.explanation
+                        item["explanationSource"] = "llm"
+                        recommendations.append(item)
+                    response["interpretedRequest"] = result.output.interpretedRequest.model_dump()
+                else:
+                    response.update({
+                        "usedFallback": True,
+                        "fallbackLabel": FALLBACK_LABEL,
+                        "fallbackReason": result.fallback_reason,
+                    })
+                    for c in pool1[:top_n]:
+                        item = stage1_item(c, c.rank)
+                        item["usedFallback"] = True
+                        recommendations.append(item)
 
         elif mode == "neumf":
             yield stage("scoring_neumf", "started")
@@ -824,44 +865,7 @@ class MovieMatchService:
                     "usedFallback": False,
                 }
 
-            if mode == "als":
-                recommendations = [als_item(c, c.rank) for c in pool[:top_n]]
-            else:
-                # 4. LLM reranking of the restricted candidate pool.
-                payload = self._llm_payload(u, user_request, pool, evidence)
-                assert self._llm_client is not None
-                t0 = time.perf_counter()
-                steps = rerank_steps(self._llm_client, payload, top_n, self.genre_vocabulary)
-                while True:
-                    try:
-                        name, status, details = next(steps)
-                    except StopIteration as stop:
-                        result: RerankResult = stop.value
-                        break
-                    yield stage(name, status, **details)
-                timings["llm"] = (time.perf_counter() - t0) * 1000
-                response["llm"] = {"attempts": result.attempts, "model": self.settings.llm.model}
-
-                if result.succeeded:
-                    assert result.output is not None
-                    by_id = {int(self.movie_ids[c.movie_idx]): c for c in pool}
-                    for ranked in result.output.rankedMovies:
-                        item = als_item(by_id[ranked.movieId], ranked.rank)
-                        item["llmRelevanceScore"] = round(ranked.llmRelevanceScore, 4)
-                        item["explanation"] = ranked.explanation
-                        item["explanationSource"] = "llm"
-                        recommendations.append(item)
-                    response["interpretedRequest"] = result.output.interpretedRequest.model_dump()
-                else:
-                    response.update({
-                        "usedFallback": True,
-                        "fallbackLabel": FALLBACK_LABEL,
-                        "fallbackReason": result.fallback_reason,
-                    })
-                    for c in pool[:top_n]:
-                        item = als_item(c, c.rank)
-                        item["usedFallback"] = True
-                        recommendations.append(item)
+            recommendations = [als_item(c, c.rank) for c in pool[:top_n]]
 
         response["recommendations"] = recommendations
         response["stageTimingsMs"] = {k: round(v, 1) for k, v in timings.items()}
@@ -882,7 +886,7 @@ class MovieMatchService:
         self,
         user_idx: int,
         user_request: str,
-        pool: list[AlsCandidate],
+        pool: list[Stage1Candidate],
         evidence: dict[int, list[Evidence]],
     ) -> dict[str, Any]:
         """Compact, grounded input: only data the backend can vouch for."""
@@ -898,8 +902,12 @@ class MovieMatchService:
                 "title": self.movie_titles[idx],
                 "genres": self.movie_genres[idx],
                 "tags": self.movie_tags.get(idx, [])[:6],
-                "alsScore": round(c.normalized_score, 3),
-                "originalAlsRank": c.rank,
+                "mergedScore": round(c.merged_score, 3),
+                "stage1Rank": c.rank,
+                "alsScore": None if c.als_score is None else round(c.als_score, 3),
+                "knnScore": None if c.knn_score is None else round(c.knn_score, 3),
+                "originalAlsRank": c.als_rank,
+                "candidateSource": c.source,
                 "knnEvidence": [
                     {"historyMovie": self.movie_titles[e.history_movie_idx], "similarity": round(e.similarity, 3)}
                     for e in evidence.get(idx, [])[:2]

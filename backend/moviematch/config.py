@@ -60,6 +60,7 @@ class LlmSettings:
     timeout_seconds: float
     json_mode: bool
     temperature: float
+    structured_output: bool = False
 
     @property
     def configured(self) -> bool:
@@ -169,6 +170,7 @@ def load_settings() -> Settings:
             timeout_seconds=_env_float("LLM_TIMEOUT_SECONDS", 60.0),
             json_mode=_env_bool("LLM_JSON_MODE", True),
             temperature=_env_float("LLM_TEMPERATURE", 0.2),
+            structured_output=_env_bool("LLM_STRUCTURED_OUTPUT", False),
         ),
         poster_url_template=_env_str("POSTER_URL_TEMPLATE"),
         cors_origins=[o.strip() for o in cors.split(",") if o.strip()],

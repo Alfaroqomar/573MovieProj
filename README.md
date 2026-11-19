@@ -7,7 +7,7 @@ User ratings
       ↓
 Classical recommendation models: Popularity / Item-KNN / ALS
       ↓
-Top 20–100 candidate movies (50 by default, from ALS)
+Top 50 candidate movies from merged ALS and Item-KNN picks
       ↓
 LLM assistance: query interpretation · candidate reranking · grounded explanations
       ↓
@@ -112,10 +112,18 @@ LLM_API_KEY=                                # set if your provider requires one
 LLM_MODEL=                                  # the model name your provider expects
 LLM_TIMEOUT_SECONDS=60
 LLM_JSON_MODE=true                          # set false if the provider rejects response_format
+LLM_STRUCTURED_OUTPUT=false                 # set true for Ollama's candidate-ID schema
 ```
 
+For a local Ollama demo, install Ollama, run `ollama pull gemma3:4b`, and start it with `ollama serve`
+if it is not already running. Set `LLM_BASE_URL=http://localhost:11434/v1`, `LLM_MODEL=gemma3:4b`,
+`LLM_ENABLED=true`, `LLM_STRUCTURED_OUTPUT=true`, and `LLM_TEMPERATURE=0` in your untracked `.env`.
+No API key is needed. The response schema restricts movie IDs to the current shortlist; the backend still
+checks the final answer for duplicates, rank gaps, and other errors. A successful local example is a **demo**,
+not evidence that LLM ranking improves offline accuracy.
+
 For ASU Voyager or a hosted open-weight model, use that service's OpenAI-compatible base URL, key, and model
-name. If the LLM is not configured, the **ALS + LLM Reranking** option is disabled, the UI shows
+name. If the LLM is not configured, the **Stage 1 + LLM Reranking** option is disabled, the UI shows
 “LLM reranking is not configured.”, and Popularity, Item-KNN, and ALS keep working.
 
 ## What each part does
@@ -199,10 +207,10 @@ source, KNN evidence, cold-start flag) and `test_users.jsonl` (history size, fav
 
 ### LLM reranking (`backend/moviematch/llm/`)
 
-1. ALS produces the top-50 unseen candidates.
+1. Stage 1 merges ALS and Item-KNN picks into a 50-movie shortlist.
 2. Item-KNN attaches up to two similarity links per candidate to the user's highly rated movies.
 3. The backend sends compact JSON: the request text, the user's highly rated movies and favourite genres, and
-   per candidate its ID, title, year, MovieLens genres, top tags, ALS score and rank, and KNN evidence.
+   per candidate its ID, title, year, MovieLens genres, top tags, Stage 1 rank, merged and model scores, and KNN evidence.
 4. The LLM must return strict JSON with `interpretedRequest` and `rankedMovies`.
 5. The backend validates the response:
    strict JSON parse (one enclosing ```` ```json ```` fence is tolerated; NaN/Infinity rejected) → Pydantic
@@ -211,10 +219,10 @@ source, KNN evidence, cold-start flag) and `test_users.jsonl` (history size, fav
    300 characters → interpreted genres restricted to MovieLens genre names. Failures are logged without
    prompts or secrets.
 6. On a validation failure the backend makes **one** correction call listing the errors. If that fails too,
-   or the LLM times out or errors, the result is the original ALS order marked
-   **“ALS fallback because LLM reranking failed.”** with the reason. No LLM output is ever fabricated.
+   or the LLM times out or errors, the result is the original Stage 1 order marked
+   **“Stage 1 fallback because LLM reranking failed.”** with the reason. No LLM output is ever fabricated.
 
-The LLM never generates candidates and cannot introduce a movie outside the ALS pool.
+The LLM never generates candidates and cannot introduce a movie outside the Stage 1 shortlist.
 
 ### Evaluation (`backend/moviematch/models/evaluation.py`)
 
@@ -315,7 +323,7 @@ directory. It exists only for the tests; the application never uses or falls bac
 
 - MovieLens has no plots, cast, directors, or posters; explanations can only cite genres, tags, ratings, and
   similarity evidence.
-- The LLM can only reorder 50 candidates; it cannot recover a movie ALS did not propose.
+- The LLM can only reorder the Stage 1 shortlist; it cannot recover a movie missing from it.
 - Validation checks the LLM's structure and IDs, not every sentence of its explanations.
 - Tags are community-applied and sparse; many movies have none. Tags are used as content metadata and are not
   split by time.

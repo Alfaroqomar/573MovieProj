@@ -154,16 +154,16 @@ export function HomePage() {
           <div className="measure space-y-3 text-muted">
             <p>
               <span className="text-paper">ALS</span> factorizes the training ratings into user and movie vectors and
-              proposes the 50 unseen movies that best match a user's vector.
+              scores unseen movies for the user's rating history.
             </p>
             <p>
-              <span className="text-paper">Item-KNN</span> adds evidence: which of the user's highly rated movies each
-              candidate is most similar to, based on who rated them.
+              <span className="text-paper">Item-KNN</span> scores similar movies. Its picks are combined with ALS picks
+              into a 50-movie shortlist.
             </p>
             <p>
               <span className="text-paper">The LLM</span> receives only those candidates with their MovieLens genres,
               tags, and scores. It reorders them for your request and explains each pick. The backend rejects any
-              response that names a movie outside the candidate list and falls back to the ALS order if needed.
+              response that names a movie outside the candidate list and falls back to the Stage 1 order if needed.
             </p>
           </div>
         </div>

@@ -227,7 +227,7 @@ export function EvaluationPanel({ evaluation }: { evaluation: EvaluationResults 
             .
           </p>
         ) : null}
-        {evaluation.notEvaluated?.als_llm ? <p>ALS + LLM: {evaluation.notEvaluated.als_llm}</p> : null}
+        {evaluation.notEvaluated?.als_llm ? <p>Stage 1 + LLM: {evaluation.notEvaluated.als_llm}</p> : null}
       </div>
     </div>
   );

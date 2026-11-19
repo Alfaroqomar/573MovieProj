@@ -82,7 +82,7 @@ export function ComparePage() {
         <h1 className="display text-4xl text-paper">Compare models</h1>
         <p className="measure mt-2 text-muted">
           Run every available model for the same MovieLens user and see where their lists agree, where they differ, and
-          how the LLM reordered the ALS candidates.
+          how the LLM reordered the Stage 1 shortlist.
         </p>
       </div>
 

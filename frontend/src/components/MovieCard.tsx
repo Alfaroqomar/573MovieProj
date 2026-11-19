@@ -6,7 +6,7 @@ import { Button, Facts, GenreList, ModeBadge } from "./ui";
 export function RankShift({ from, to }: { from: number; to: number }) {
   const moved = from - to;
   const text =
-    moved > 0 ? `up ${moved} from ALS #${from}` : moved < 0 ? `down ${-moved} from ALS #${from}` : `same as ALS #${from}`;
+    moved > 0 ? `up ${moved} from Stage 1 #${from}` : moved < 0 ? `down ${-moved} from Stage 1 #${from}` : `same as Stage 1 #${from}`;
   return (
     <span className="num inline-flex items-center gap-1 text-xs text-muted">
       <span aria-hidden className={moved > 0 ? "text-ok" : moved < 0 ? "text-bad" : "text-faint"}>
@@ -67,9 +67,9 @@ export function scoreRows(rec: Recommendation): Array<[string, string] | false> 
       return [["NeuMF score", fmtScore(rec.neumfScore)]];
     case "als_llm":
       return [
-        ["Original ALS rank", `#${rec.originalAlsRank}`],
+        ["Stage 1 rank", `#${rec.stage1Rank}`],
         ["Final rank", `#${rec.finalRank}`],
-        ["ALS score", fmtScore(rec.alsScore)],
+        ["Merged score", fmtScore(rec.mergedScore)],
         ["Strongest KNN similarity", fmtScore(rec.strongestKnnSimilarity)],
         !rec.usedFallback && ["LLM request match", fmtScore(rec.llmRelevanceScore)],
       ];
@@ -79,7 +79,7 @@ export function scoreRows(rec: Recommendation): Array<[string, string] | false> 
 export function MovieCard({ rec, onDetails }: { rec: Recommendation; onDetails: (rec: Recommendation) => void }) {
   const info = modeInfo(rec.mode);
   const titleId = `rec-${rec.mode}-${rec.movie.movieId}`;
-  const showShift = rec.mode === "als_llm" && !rec.usedFallback && rec.originalAlsRank != null;
+  const showShift = rec.mode === "als_llm" && !rec.usedFallback && rec.stage1Rank != null;
   const evidence = rec.knnEvidence ?? [];
 
   return (
@@ -93,7 +93,7 @@ export function MovieCard({ rec, onDetails }: { rec: Recommendation; onDetails: 
         </p>
         <div className="flex flex-col items-end gap-1">
           <ModeBadge label={info.short} color={info.colorVar} />
-          {showShift ? <RankShift from={rec.originalAlsRank!} to={rec.finalRank} /> : null}
+          {showShift ? <RankShift from={rec.stage1Rank!} to={rec.finalRank} /> : null}
         </div>
       </div>
 

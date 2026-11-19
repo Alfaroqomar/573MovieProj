@@ -50,6 +50,47 @@ class ValidationOutcome:
         return self.output is not None and not self.errors
 
 
+def response_schema(candidate_ids: list[int], count: int) -> dict:
+    """Constrain supported LLMs to the requested shape and candidate IDs."""
+    short_list = {"type": "array", "items": {"type": "string"}, "maxItems": MAX_LIST_ITEMS}
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "movie_rerank",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "interpretedRequest": {
+                        "type": "object",
+                        "properties": {name: short_list for name in ("preferredGenres", "preferredTags", "similarTo", "avoid")},
+                        "required": ["preferredGenres", "preferredTags", "similarTo", "avoid"],
+                        "additionalProperties": False,
+                    },
+                    "rankedMovies": {
+                        "type": "array",
+                        "minItems": count,
+                        "maxItems": count,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "movieId": {"type": "integer", "enum": candidate_ids},
+                                "rank": {"type": "integer", "minimum": 1, "maximum": count},
+                                "llmRelevanceScore": {"type": "number", "minimum": 0, "maximum": 1},
+                                "explanation": {"type": "string", "minLength": 1, "maxLength": MAX_EXPLANATION_CHARS},
+                            },
+                            "required": ["movieId", "rank", "llmRelevanceScore", "explanation"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["interpretedRequest", "rankedMovies"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
 def _reject_constant(name: str) -> float:
     raise ValueError(f"non-standard JSON constant {name}")
 

@@ -69,6 +69,7 @@ export interface Recommendation {
   movie: Movie;
   mode: RecommendationMode;
   finalRank: number;
+  stage1Rank?: number | null;
   originalAlsRank?: number | null;
   alsScore?: number | null;
   alsRawScore?: number | null;

@@ -144,9 +144,11 @@ class FakeLlm:
     def __init__(self, responses: list[object]):
         self.responses = list(responses)
         self.calls: list[list[dict[str, str]]] = []
+        self.response_formats: list[dict | None] = []
 
-    def complete(self, messages: list[dict[str, str]]) -> str:
+    def complete(self, messages: list[dict[str, str]], response_format: dict | None = None) -> str:
         self.calls.append(messages)
+        self.response_formats.append(response_format)
         response = self.responses.pop(0)
         if isinstance(response, Exception):
             raise response

@@ -102,18 +102,20 @@ def test_classical_recommendations_exclude_rated(prepared, endpoint, mode):
 def test_als_llm_reranks_only_candidates(prepared):
     llm = FakeLlm([valid_response_for(10)])
     with client_for(with_llm(prepared), llm) as client:
-        als = client.post("/api/recommendations/als", json={"userId": 5, "topN": 50}).json()
-        als_ids = [r["movie"]["movieId"] for r in als["recommendations"]]
+        stage1 = client.post("/api/recommendations/stage1", json={"userId": 5, "topN": 50}).json()
+        stage1_ids = [r["movie"]["movieId"] for r in stage1["recommendations"]]
         r = client.post("/api/recommendations/als-llm", json={"userId": 5, "topN": 10, "userRequest": "quiet sci-fi"})
         assert r.status_code == 200
         data = r.json()
     sent = candidate_ids_from(llm.calls[0])
-    assert sent == als_ids  # exactly the ALS top-50, in ALS order
+    assert sent == stage1_ids
+    payload = json.loads(llm.calls[0][1]["content"])
+    assert all("mergedScore" in c and "stage1Rank" in c for c in payload["candidates"])
     assert "secret-key" not in json.dumps(llm.calls[0])
     assert data["usedFallback"] is False
     recs = data["recommendations"]
-    assert [r["movie"]["movieId"] for r in recs] == list(reversed(als_ids))[:10]
-    assert recs[0]["originalAlsRank"] == 50 and recs[0]["finalRank"] == 1
+    assert [r["movie"]["movieId"] for r in recs] == list(reversed(stage1_ids))[:10]
+    assert recs[0]["stage1Rank"] == 50 and recs[0]["finalRank"] == 1
     assert all(r["explanationSource"] == "llm" and r["llmRelevanceScore"] is not None for r in recs)
     assert data["interpretedRequest"]["preferredGenres"] == ["Sci-Fi"]
 
@@ -126,11 +128,11 @@ def test_als_llm_falls_back_transparently(prepared):
     llm = FakeLlm([unknown, unknown])
     with client_for(with_llm(prepared), llm) as client:
         data = client.post("/api/recommendations/als-llm", json={"userId": 5, "topN": 5}).json()
-        als = client.post("/api/recommendations/als", json={"userId": 5, "topN": 5}).json()
+        stage1 = client.post("/api/recommendations/stage1", json={"userId": 5, "topN": 5}).json()
     assert len(llm.calls) == 2
     assert data["usedFallback"] is True
-    assert data["fallbackLabel"] == "ALS fallback because LLM reranking failed."
-    assert [r["movie"]["movieId"] for r in data["recommendations"]] == [r["movie"]["movieId"] for r in als["recommendations"]]
+    assert data["fallbackLabel"] == "Stage 1 fallback because LLM reranking failed."
+    assert [r["movie"]["movieId"] for r in data["recommendations"]] == [r["movie"]["movieId"] for r in stage1["recommendations"]]
     assert all(r["usedFallback"] and r["llmRelevanceScore"] is None for r in data["recommendations"])
 
 
@@ -146,6 +148,7 @@ def test_streaming_progress_events(prepared):
         ("generating_als", "started"), ("generating_als", "done"),
         ("finding_similar", "started"), ("finding_similar", "done"),
     ]
+    assert ("merging_candidates", "done") in stages
     assert ("reranking_llm", "failed") in stages
     result = events[-1]
     assert result["type"] == "result" and result["data"]["usedFallback"] is True
@@ -184,6 +187,15 @@ def test_http_client_hides_secrets():
     client = OpenAICompatibleClient(settings, transport=httpx.MockTransport(ok))
     assert client.complete([{"role": "user", "content": "hi"}]) == "{}"
     assert "top-secret" not in repr(settings)
+
+    structured = dataclasses.replace(settings, structured_output=True)
+    def structured_ok(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["response_format"]["json_schema"]["schema"]["properties"]["movieId"]["enum"] == [11, 22]
+        return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}}]})
+    client = OpenAICompatibleClient(structured, transport=httpx.MockTransport(structured_ok))
+    fmt = {"type": "json_schema", "json_schema": {"schema": {"type": "object", "properties": {"movieId": {"enum": [11, 22]}}}}}
+    assert client.complete([{"role": "user", "content": "hi"}], response_format=fmt) == "{}"
 
 
 def test_retrained_artifacts_need_restart(prepared, tmp_path):

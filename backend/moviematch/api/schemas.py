@@ -55,6 +55,7 @@ class RecommendationOut(BaseModel):
     movie: MovieOut
     mode: Mode
     finalRank: int
+    stage1Rank: int | None = None
     originalAlsRank: int | None = None
     alsScore: float | None = None
     alsRawScore: float | None = None

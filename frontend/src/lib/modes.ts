@@ -58,9 +58,9 @@ export const MODES: Array<{
   },
   {
     id: "als_llm",
-    label: "ALS + LLM reranking",
-    short: "ALS + LLM",
-    description: "ALS picks 50 candidates; the LLM reorders only those to match what you ask for and explains each pick.",
+    label: "Stage 1 + LLM reranking",
+    short: "Stage 1 + LLM",
+    description: "ALS and Item-KNN build a 50-movie shortlist; the LLM reorders it and explains each pick.",
     colorVar: "var(--color-model-llm)",
   },
 ];
@@ -86,7 +86,7 @@ export const STAGES_BY_MODE: Record<RecommendationMode, StageName[]> = {
   als_explicit: ["loading_history", "generating_als", "finding_similar"],
   stage1: ["loading_history", "generating_als", "finding_similar", "merging_candidates"],
   neumf: ["loading_history", "scoring_neumf"],
-  als_llm: ["loading_history", "generating_als", "finding_similar", "reranking_llm", "validating"],
+  als_llm: ["loading_history", "generating_als", "finding_similar", "merging_candidates", "reranking_llm", "validating"],
 };
 
 const integer = new Intl.NumberFormat("en-US");
