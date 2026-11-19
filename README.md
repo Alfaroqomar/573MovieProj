@@ -75,6 +75,7 @@ Run from the repository root. Each step is separate, so models are never retrain
 | Train NeuMF (optional, needs PyTorch) | `cd backend && python -m moviematch.cli train --only neumf` | `make neumf` |
 | Evaluate (optional) | `cd backend && python -m moviematch.cli evaluate` | `make evaluate` |
 | Export Stage 1 shortlists for the LLM stage | `cd backend && python -m moviematch.cli candidates` | `make candidates` |
+| Small LLM validation pilot | `cd backend && python -m moviematch.cli llm-pilot --users 5` | — |
 | **Start backend** | `cd backend && python -m uvicorn moviematch.api.main:app --port 8000` | `make backend` |
 | **Start frontend** | `cd frontend && npm run dev` | `make frontend` |
 | Backend tests | `cd backend && python -m pytest` | `make test` |
@@ -89,6 +90,8 @@ Useful options:
 - `evaluate --split validation` evaluates on the validation period (for tuning); `--users 2000` changes the
   sample size; `--k 20` changes the cutoff.
 - `candidates --users 500` sets how many test users get a 50-movie shortlist file.
+- The LLM pilot compares the same validation users against ALS, Item-KNN, and Stage 1. It writes to
+  `artifacts/llm_pilot/validation.json` and is exploratory, not a final test result. See [LLM_VALIDATION.md](LLM_VALIDATION.md).
 - Restart the backend after preprocessing or training so it loads the new artifacts.
 
 Measured on MovieLens 32M (2-core cloud machine; a laptop is usually faster): preprocessing 50 s (3.8 GB

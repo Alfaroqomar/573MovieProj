@@ -8,6 +8,7 @@ import scipy.sparse as sp
 
 from moviematch.data.paths import model_paths, processed_paths
 from moviematch.models.als import AlsModel
+from moviematch.models.candidates import favorite_genres_from_history, historical_tags
 from moviematch.models.common import top_k, user_row
 from moviematch.models.evaluation import coverage, evaluate, gini, ranking_metrics, serendipity
 from moviematch.models.item_knn import ItemKnnModel
@@ -20,6 +21,24 @@ def test_top_k_excludes_and_orders():
     assert top_k(scores, 3).tolist() == [1, 3, 2]
     assert top_k(scores, 3, exclude=np.array([1])).tolist() == [3, 2, 0]
     assert top_k(scores, 10).tolist() == [1, 3, 2, 0]
+
+
+def test_candidate_profile_uses_only_history():
+    genres = np.array(["Drama", "Sci-Fi", "Sci-Fi", "Horror"])
+    history = np.array([0, 1, 2])
+    ratings = np.array([5.0, 3.0, 2.0])
+    assert favorite_genres_from_history(history, ratings, genres, 4.0) == ["Drama"]
+    assert favorite_genres_from_history(history, ratings, genres, 6.0) == ["Sci-Fi", "Drama"]
+
+
+def test_historical_tags_exclude_later_tags(tmp_path):
+    path = tmp_path / "tags.csv"
+    path.write_text(
+        "userId,movieId,tag,timestamp\n"
+        "1,10,Thoughtful,1577836799\n"
+        "2,10,Future Plot,1577836800\n"
+    )
+    assert historical_tags(path, "2020-01-01", 6) == {10: ["thoughtful"]}
 
 
 def _user(prepared, user_idx=5):

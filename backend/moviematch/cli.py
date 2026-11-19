@@ -6,6 +6,7 @@
     python -m moviematch.cli train --only neumf   # NeuMF (needs PyTorch)
     python -m moviematch.cli evaluate     # offline metrics on the test split
     python -m moviematch.cli candidates   # Stage 1 shortlists for the LLM stage
+    python -m moviematch.cli llm-pilot    # small validation comparison
 """
 
 from __future__ import annotations
@@ -69,6 +70,17 @@ def _cmd_evaluate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_llm_pilot(args: argparse.Namespace) -> int:
+    from moviematch.llm.pilot import run_validation_pilot
+
+    try:
+        run_validation_pilot(get_settings(), users=args.users)
+    except (FileNotFoundError, RuntimeError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     parser = argparse.ArgumentParser(prog="moviematch")
@@ -105,6 +117,10 @@ def main(argv: list[str] | None = None) -> int:
     candidates.add_argument("--split", choices=["test", "validation"], default="test")
     candidates.add_argument("--users", type=int, default=500)
     candidates.set_defaults(func=_cmd_candidates)
+
+    pilot = sub.add_parser("llm-pilot", help="Compare the LLM with classical rankings on a small validation sample")
+    pilot.add_argument("--users", type=int, default=5, help="Number of validation users (default: 5)")
+    pilot.set_defaults(func=_cmd_llm_pilot)
 
     args = parser.parse_args(argv)
     return int(args.func(args))

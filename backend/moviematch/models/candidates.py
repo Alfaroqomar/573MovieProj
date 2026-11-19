@@ -20,7 +20,9 @@ cold-start users included first so they are always represented.
 from __future__ import annotations
 
 import json
+from collections import Counter
 from collections.abc import Callable
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -29,12 +31,38 @@ import scipy.sparse as sp
 from moviematch.config import Settings
 from moviematch.data.paths import candidates_dir, model_paths, processed_paths
 from moviematch.data.preprocess import SPLIT_TEST, SPLIT_TRAIN, SPLIT_VALIDATION, build_matrix
+from moviematch.data.preprocess import normalize_tag
 from moviematch.models.als import AlsModel
 from moviematch.models.common import user_row
 from moviematch.models.item_knn import ItemKnnModel
 from moviematch.models.stage1 import merge_candidates
 
 Log = Callable[[str], None]
+
+
+def favorite_genres_from_history(
+    history: np.ndarray, ratings: np.ndarray, movie_genres: np.ndarray, threshold: float, limit: int = 5
+) -> list[str]:
+    liked = history[ratings >= threshold]
+    source = liked if len(liked) else history
+    counts = Counter(
+        genre
+        for movie_idx in source
+        for genre in movie_genres[int(movie_idx)].split("|")
+        if genre and genre != "(no genres listed)"
+    )
+    return [genre for genre, _ in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]]
+
+
+def historical_tags(path: Path, cutoff: str, limit: int) -> dict[int, list[str]]:
+    frame = pd.read_csv(path, usecols=["userId", "movieId", "tag", "timestamp"])
+    cutoff_ts = int(pd.Timestamp(cutoff, tz="UTC").timestamp())
+    frame = frame[(frame["timestamp"] < cutoff_ts) & frame["tag"].notna()].copy()
+    frame["tag"] = frame["tag"].astype(str).map(normalize_tag)
+    frame = frame[frame["tag"].str.len() > 0].drop_duplicates(["userId", "movieId", "tag"])
+    counts = frame.groupby(["movieId", "tag"]).size().rename("count").reset_index()
+    counts = counts.sort_values(["movieId", "count", "tag"], ascending=[True, False, True])
+    return counts.groupby("movieId")["tag"].apply(lambda values: values.head(limit).tolist()).to_dict()
 
 
 def export_candidates(settings: Settings, split_name: str = "test", n_users: int = 500, log: Log = print) -> dict:
@@ -71,10 +99,15 @@ def export_candidates(settings: Settings, split_name: str = "test", n_users: int
     years = movies["year"].to_numpy()
     genres = movies["genres"].astype(str).to_numpy()
     movie_ids = movies["movieId"].to_numpy()
-    tags = pd.read_parquet(pp.movie_tags).groupby("movie_idx")["tag"].apply(list).to_dict()
+    if settings.split_mode == "date" and settings.movielens_data_path is not None:
+        cutoff = settings.split_validation_start if target == SPLIT_VALIDATION else settings.split_test_start
+        tags_by_id = historical_tags(settings.movielens_data_path / "tags.csv", cutoff, settings.tags_per_movie)
+        tags = {int(movie_id): values for movie_id, values in tags_by_id.items()}
+    else:
+        movie_tags = pd.read_parquet(pp.movie_tags).groupby("movie_idx")["tag"].apply(list).to_dict()
+        tags = {int(movie_ids[idx]): values for idx, values in movie_tags.items()}
     users = pd.read_parquet(pp.users)
     user_ids = users["userId"].to_numpy()
-    fav = users["favorite_genres"].astype(str).to_numpy()
 
     als = AlsModel.load(mp.als, mp.als_meta)
     knn = ItemKnnModel.load(mp.knn, settings.high_rating_threshold, settings.knn_scoring, settings.knn_min_support)
@@ -97,7 +130,7 @@ def export_candidates(settings: Settings, split_name: str = "test", n_users: int
                 "title": titles[m],
                 "year": None if pd.isna(years[m]) else int(years[m]),
                 "genres": genres[m].split("|") if genres[m] else [],
-                "tags": tags.get(m, [])[:6],
+                "tags": tags.get(int(movie_ids[m]), [])[:6],
                 "merged_score": round(c.merged_score, 4),
                 "als_score": None if c.als_score is None else round(c.als_score, 4),
                 "knn_score": None if c.knn_score is None else round(c.knn_score, 4),
@@ -118,7 +151,7 @@ def export_candidates(settings: Settings, split_name: str = "test", n_users: int
             "user_id": int(user_ids[u]),
             "history_size": int(counts[u]),
             "is_cold_start": is_cold,
-            "favorite_genres": fav[u].split("|") if fav[u] else [],
+            "favorite_genres": favorite_genres_from_history(h, r, genres, settings.high_rating_threshold),
             "highly_rated": [{"movie_id": int(movie_ids[liked[i]]), "title": titles[liked[i]], "rating": float(liked_r[i])} for i in order],
             "recent_5": [{"movie_id": int(movie_ids[m]), "title": titles[m], "rating": float(x)} for m, x in zip(rec["movie_idx"], rec["rating"])],
             "relevant_movie_ids": [int(movie_ids[m]) for m in relevant[u]],
