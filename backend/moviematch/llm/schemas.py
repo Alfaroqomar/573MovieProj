@@ -118,7 +118,6 @@ def validate_llm_output(
     max_explanation_chars: int = MAX_EXPLANATION_CHARS,
     grounded_explanations: dict[int, str] | None = None,
 ) -> ValidationOutcome:
-    # 1. Strict JSON.
     try:
         data = json.loads(_strip_single_fence(text), parse_constant=_reject_constant)
     except (json.JSONDecodeError, ValueError) as exc:
@@ -133,7 +132,6 @@ def validate_llm_output(
                 movie["rank"] = rank
                 movie["explanation"] = "Selected from the shortlist."
 
-    # 2 & 5. Pydantic schema, including required fields and forbidden extras.
     try:
         parsed = LlmRerankOutput.model_validate(data)
     except ValidationError as exc:
@@ -148,29 +146,24 @@ def validate_llm_output(
     allowed = set(candidate_ids)
     movies = parsed.rankedMovies
 
-    # 3 & 9. Every movie must come from the supplied candidate pool.
     unknown = [m.movieId for m in movies if m.movieId not in allowed]
     if unknown:
         errors.append(
             "movieId values not in the candidate list: " + ", ".join(map(str, unknown[:10]))
         )
 
-    # 4. No duplicates.
     ids = [m.movieId for m in movies]
     duplicates = sorted({i for i in ids if ids.count(i) > 1})
     if duplicates:
         errors.append("Duplicate movieId values: " + ", ".join(map(str, duplicates)))
 
-    # Exact number of results requested.
     if len(movies) != expected_count:
         errors.append(f"Expected exactly {expected_count} rankedMovies, received {len(movies)}.")
 
-    # 7. Ranks unique and sequential from 1.
     ranks = sorted(m.rank for m in movies)
     if ranks != list(range(1, len(movies) + 1)):
         errors.append("rank values must be unique and sequential starting at 1.")
 
-    # 6. Scores: reject non-finite values, clamp to [0, 1].
     for movie in movies:
         score = movie.llmRelevanceScore
         if not math.isfinite(score):
@@ -179,7 +172,6 @@ def validate_llm_output(
             movie.llmRelevanceScore = min(1.0, max(0.0, score))
             warnings.append(f"Clamped llmRelevanceScore for movieId {movie.movieId} to [0, 1].")
 
-    # 8. Concise, non-empty explanations.
     for movie in movies:
         if grounded_explanations is not None and movie.movieId in grounded_explanations:
             movie.explanation = grounded_explanations[movie.movieId]
@@ -194,7 +186,6 @@ def validate_llm_output(
     if errors:
         return ValidationOutcome(None, errors, warnings)
 
-    # Interpreted request: keep only MovieLens genre names; tidy the rest.
     vocabulary = {g.lower(): g for g in genre_vocabulary}
     interpreted = parsed.interpretedRequest
     kept = [vocabulary[g.lower()] for g in interpreted.preferredGenres if g.lower() in vocabulary]
