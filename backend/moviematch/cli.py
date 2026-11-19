@@ -74,7 +74,7 @@ def _cmd_llm_pilot(args: argparse.Namespace) -> int:
     from moviematch.llm.pilot import run_validation_pilot
 
     try:
-        run_validation_pilot(get_settings(), users=args.users)
+        run_validation_pilot(get_settings(), users=args.users, split=args.split)
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -118,8 +118,9 @@ def main(argv: list[str] | None = None) -> int:
     candidates.add_argument("--users", type=int, default=500)
     candidates.set_defaults(func=_cmd_candidates)
 
-    pilot = sub.add_parser("llm-pilot", help="Compare the LLM with classical rankings on a small validation sample")
-    pilot.add_argument("--users", type=int, default=5, help="Number of validation users (default: 5)")
+    pilot = sub.add_parser("llm-pilot", help="Compare the LLM with classical rankings on sampled MovieLens users")
+    pilot.add_argument("--users", type=int, default=5, help="Number of users to sample (default: 5)")
+    pilot.add_argument("--split", choices=["validation", "test"], default="validation")
     pilot.set_defaults(func=_cmd_llm_pilot)
 
     args = parser.parse_args(argv)

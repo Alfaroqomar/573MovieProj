@@ -24,8 +24,7 @@ export function AboutPage() {
       <div className="measure">
         <h1 className="display text-4xl text-paper">About MovieMatch</h1>
         <p className="mt-3 text-muted">
-          A course project that asks a narrow question: if a classical recommender has already found good candidates,
-          can a language model improve the order and explain it, without being allowed to invent anything?
+          MovieMatch tests whether a language model can improve the order of movies shortlisted by classical recommenders.
         </p>
       </div>
 
@@ -34,7 +33,7 @@ export function AboutPage() {
           Classical collaborative filtering is strong at finding movies a person is likely to enjoy, but it cannot read a
           request like “something like Interstellar, with less action” and its scores are hard to explain. MovieMatch keeps
           the classical models in charge of <strong>which</strong> movies are considered and lets an LLM decide only the{" "}
-          <strong>order</strong> and the <strong>explanation</strong>, using data the backend supplies.
+          <strong>order</strong>. The app writes each explanation from the movie data and rating history it supplies.
         </p>
       </Section>
 
@@ -111,7 +110,7 @@ export function AboutPage() {
           The backend sends the request text, the user's highly rated movies and favourite genres, and for each candidate
           its title, year, MovieLens genres and tags, Stage 1 and model scores, and up to two KNN similarities. The LLM must
           return strict JSON. The backend checks that every movie ID came from the candidate list, that there are no
-          duplicates, that ranks run 1 to N, that scores are numbers between 0 and 1, and that explanations are short. One
+          duplicates, and that scores are finite. The backend sets ranks from list order and writes short explanations. One
           correction attempt is allowed; if it also fails, or the LLM times out, the page shows the Stage 1 order marked
           “Stage 1 fallback because LLM reranking failed.”
         </p>
@@ -177,7 +176,7 @@ export function AboutPage() {
           <li>MovieLens has no posters, plots, cast, or directors. Cards use generated placeholders unless a poster source is configured, and explanations can only cite genres, tags, and ratings.</li>
           <li>The LLM can only reorder 50 candidates. If ALS misses a movie that fits the request, reranking cannot recover it.</li>
           <li>Stage 1 + LLM reranking is not part of the offline evaluation, because it would need one LLM call per evaluated user.</li>
-          <li>LLM explanations are constrained and validated for structure, but their wording is not fact-checked sentence by sentence.</li>
+          <li>Explanations describe the evidence available for each pick. They cannot reveal the model’s internal reasoning.</li>
           <li>Tags are community-applied and uneven: many movies have none.</li>
           <li>MovieLens users are not a random sample of viewers, and ratings stop in October 2023.</li>
           <li>With the date split, few users are cold-start (1–10 earlier ratings), so cold-start results rest on a small group; the Compare page shows how many.</li>

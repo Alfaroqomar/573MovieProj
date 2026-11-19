@@ -16,7 +16,14 @@ def test_validation_pilot_uses_exported_candidates(prepared, monkeypatch):
         def close(self):
             pass
 
-    fake = FakeClient([valid_response_for(10) for _ in range(5)])
+    def compact_response(messages):
+        output = json.loads(valid_response_for(10)(messages))
+        for movie in output["rankedMovies"]:
+            movie.pop("rank")
+            movie.pop("explanation")
+        return json.dumps(output)
+
+    fake = FakeClient([compact_response for _ in range(5)])
     monkeypatch.setattr(pilot, "OpenAICompatibleClient", lambda _: fake)
     report = json.loads(pilot.run_validation_pilot(settings, users=5, log=lambda _: None).read_text())
 

@@ -9,9 +9,9 @@ Classical recommendation models: Popularity / Item-KNN / ALS
       ↓
 Top 50 candidate movies from merged ALS and Item-KNN picks
       ↓
-LLM assistance: query interpretation · candidate reranking · grounded explanations
+LLM: query interpretation and candidate reranking
       ↓
-Validated final Top-N recommendations
+Validated Top-N recommendations with explanations from movie and rating data
 ```
 
 Everything shown in the app is computed from the real dataset and the models trained on it. There is no mock
@@ -75,7 +75,7 @@ Run from the repository root. Each step is separate, so models are never retrain
 | Train NeuMF (optional, needs PyTorch) | `cd backend && python -m moviematch.cli train --only neumf` | `make neumf` |
 | Evaluate (optional) | `cd backend && python -m moviematch.cli evaluate` | `make evaluate` |
 | Export Stage 1 shortlists for the LLM stage | `cd backend && python -m moviematch.cli candidates` | `make candidates` |
-| Small LLM validation pilot | `cd backend && python -m moviematch.cli llm-pilot --users 5` | — |
+| Sampled LLM evaluation | `cd backend && python -m moviematch.cli llm-pilot --split validation --users 5` | — |
 | **Start backend** | `cd backend && python -m uvicorn moviematch.api.main:app --port 8000` | `make backend` |
 | **Start frontend** | `cd frontend && npm run dev` | `make frontend` |
 | Backend tests | `cd backend && python -m pytest` | `make test` |
@@ -90,8 +90,9 @@ Useful options:
 - `evaluate --split validation` evaluates on the validation period (for tuning); `--users 2000` changes the
   sample size; `--k 20` changes the cutoff.
 - `candidates --users 500` sets how many test users get a 50-movie shortlist file.
-- The LLM pilot compares the same validation users against ALS, Item-KNN, and Stage 1. It writes to
-  `artifacts/llm_pilot/validation.json` and is exploratory, not a final test result. See [LLM_VALIDATION.md](LLM_VALIDATION.md).
+- The LLM comparison scores the same users across ALS, Item-KNN, Stage 1, and Stage 1 plus LLM.
+  For the held-out run, train ALS and Item-KNN with `train --with-validation --only als knn`, then run
+  `llm-pilot --split test --users 20`. See [LLM_VALIDATION.md](LLM_VALIDATION.md).
 - Restart the backend after preprocessing or training so it loads the new artifacts.
 
 Measured on MovieLens 32M (2-core cloud machine; a laptop is usually faster): preprocessing 50 s (3.8 GB
@@ -121,9 +122,8 @@ LLM_STRUCTURED_OUTPUT=false                 # set true for Ollama's candidate-ID
 For a local Ollama demo, install Ollama, run `ollama pull gemma3:4b`, and start it with `ollama serve`
 if it is not already running. Set `LLM_BASE_URL=http://localhost:11434/v1`, `LLM_MODEL=gemma3:4b`,
 `LLM_ENABLED=true`, `LLM_STRUCTURED_OUTPUT=true`, and `LLM_TEMPERATURE=0` in your untracked `.env`.
-No API key is needed. The response schema restricts movie IDs to the current shortlist; the backend still
-checks the final answer for duplicates, rank gaps, and other errors. A successful local example is a **demo**,
-not evidence that LLM ranking improves offline accuracy.
+No API key is needed. The response schema restricts movie IDs to the current shortlist, and the backend
+checks the answer for duplicates and other errors. Use the held-out MovieLens evaluation to measure ranking accuracy.
 
 For ASU Voyager or a hosted open-weight model, use that service's OpenAI-compatible base URL, key, and model
 name. If the LLM is not configured, the **Stage 1 + LLM Reranking** option is disabled, the UI shows
@@ -214,12 +214,13 @@ source, KNN evidence, cold-start flag) and `test_users.jsonl` (history size, fav
 2. Item-KNN attaches up to two similarity links per candidate to the user's highly rated movies.
 3. The backend sends compact JSON: the request text, the user's highly rated movies and favourite genres, and
    per candidate its ID, title, year, MovieLens genres, top tags, Stage 1 rank, merged and model scores, and KNN evidence.
-4. The LLM must return strict JSON with `interpretedRequest` and `rankedMovies`.
+4. The LLM returns strict JSON with `interpretedRequest` and an ordered `rankedMovies` list of IDs and scores.
 5. The backend validates the response:
    strict JSON parse (one enclosing ```` ```json ```` fence is tolerated; NaN/Infinity rejected) → Pydantic
    schema with no extra fields → every `movieId` in the candidate list → no duplicates → exactly N results →
-   ranks unique and sequential from 1 → scores finite, clamped to [0, 1] → explanations non-empty and at most
-   300 characters → interpreted genres restricted to MovieLens genre names. Failures are logged without
+   scores finite, clamped to [0, 1] → interpreted genres restricted to MovieLens genre names.
+   The backend assigns ranks and writes explanations from the candidate genres, the user profile, and Item-KNN evidence.
+   Failures are logged without
    prompts or secrets.
 6. On a validation failure the backend makes **one** correction call listing the errors. If that fails too,
    or the LLM times out or errors, the result is the original Stage 1 order marked
@@ -327,7 +328,7 @@ directory. It exists only for the tests; the application never uses or falls bac
 - MovieLens has no plots, cast, directors, or posters; explanations can only cite genres, tags, ratings, and
   similarity evidence.
 - The LLM can only reorder the Stage 1 shortlist; it cannot recover a movie missing from it.
-- Validation checks the LLM's structure and IDs, not every sentence of its explanations.
+- Explanations describe available evidence about each pick.
 - Tags are community-applied and sparse; many movies have none. Tags are used as content metadata and are not
   split by time.
 - Users with a single rating have nothing in validation or test.

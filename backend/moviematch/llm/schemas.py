@@ -75,11 +75,9 @@ def response_schema(candidate_ids: list[int], count: int) -> dict:
                             "type": "object",
                             "properties": {
                                 "movieId": {"type": "integer", "enum": candidate_ids},
-                                "rank": {"type": "integer", "minimum": 1, "maximum": count},
                                 "llmRelevanceScore": {"type": "number", "minimum": 0, "maximum": 1},
-                                "explanation": {"type": "string", "minLength": 1, "maxLength": MAX_EXPLANATION_CHARS},
                             },
-                            "required": ["movieId", "rank", "llmRelevanceScore", "explanation"],
+                            "required": ["movieId", "llmRelevanceScore"],
                             "additionalProperties": False,
                         },
                     },
@@ -118,6 +116,7 @@ def validate_llm_output(
     expected_count: int,
     genre_vocabulary: list[str],
     max_explanation_chars: int = MAX_EXPLANATION_CHARS,
+    grounded_explanations: dict[int, str] | None = None,
 ) -> ValidationOutcome:
     # 1. Strict JSON.
     try:
@@ -126,6 +125,13 @@ def validate_llm_output(
         return ValidationOutcome(None, [f"Response is not valid JSON ({exc})."])
     if not isinstance(data, dict):
         return ValidationOutcome(None, ["Response must be a single JSON object."])
+
+    if grounded_explanations is not None and isinstance(data.get("rankedMovies"), list):
+        movies = data["rankedMovies"]
+        if all(isinstance(movie, dict) and set(movie) == {"movieId", "llmRelevanceScore"} for movie in movies):
+            for rank, movie in enumerate(movies, 1):
+                movie["rank"] = rank
+                movie["explanation"] = "Selected from the shortlist."
 
     # 2 & 5. Pydantic schema, including required fields and forbidden extras.
     try:
@@ -175,6 +181,8 @@ def validate_llm_output(
 
     # 8. Concise, non-empty explanations.
     for movie in movies:
+        if grounded_explanations is not None and movie.movieId in grounded_explanations:
+            movie.explanation = grounded_explanations[movie.movieId]
         movie.explanation = " ".join(movie.explanation.split())
         if not movie.explanation:
             errors.append(f"Explanation for movieId {movie.movieId} is empty.")

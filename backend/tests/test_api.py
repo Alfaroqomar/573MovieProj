@@ -116,7 +116,7 @@ def test_als_llm_reranks_only_candidates(prepared):
     recs = data["recommendations"]
     assert [r["movie"]["movieId"] for r in recs] == list(reversed(stage1_ids))[:10]
     assert recs[0]["stage1Rank"] == 50 and recs[0]["finalRank"] == 1
-    assert all(r["explanationSource"] == "llm" and r["llmRelevanceScore"] is not None for r in recs)
+    assert all(r["explanationSource"] == "template" and r["llmRelevanceScore"] is not None for r in recs)
     assert data["interpretedRequest"]["preferredGenres"] == ["Sci-Fi"]
 
 

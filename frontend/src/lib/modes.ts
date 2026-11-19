@@ -60,7 +60,7 @@ export const MODES: Array<{
     id: "als_llm",
     label: "Stage 1 + LLM reranking",
     short: "Stage 1 + LLM",
-    description: "ALS and Item-KNN build a 50-movie shortlist; the LLM reorders it and explains each pick.",
+    description: "The LLM reorders a 50-movie shortlist from ALS and Item-KNN.",
     colorVar: "var(--color-model-llm)",
   },
 ];

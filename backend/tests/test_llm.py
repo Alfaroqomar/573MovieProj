@@ -83,12 +83,28 @@ def test_interpreted_genres_limited_to_movielens_vocabulary():
 PAYLOAD = {"userRequest": "x", "userProfile": {}, "candidates": [{"movieId": i} for i in CANDIDATES]}
 
 
+def test_compact_ranker_rejects_duplicates_and_uses_supplied_explanation():
+    def compact(*ids):
+        return body([{"movieId": movie_id, "llmRelevanceScore": 0.7} for movie_id in ids])
+
+    payload = {
+        **PAYLOAD,
+        "userProfile": {"preferredGenres": ["Drama"]},
+        "candidates": [{"movieId": 11, "genres": ["Drama"]}, {"movieId": 22, "genres": ["Action"]}],
+    }
+    llm = FakeLlm([compact(22, 22), compact(22, 11)])
+    result = rerank(llm, payload, 2, GENRES)
+    assert result.attempts == 2 and result.succeeded
+    assert [(m.movieId, m.rank) for m in result.output.rankedMovies] == [(22, 1), (11, 2)]
+    assert result.output.rankedMovies[1].explanation == "Matches genres in your rating profile: Drama."
+
+
 def test_rerank_retries_once_then_succeeds():
     good = body([movie(44, 1), movie(11, 2)])
     llm = FakeLlm(["not json", good])
     result = rerank(llm, PAYLOAD, 2, GENRES)
     assert result.succeeded and result.attempts == 2
-    assert "rejected" in llm.calls[1][-1]["content"]
+    assert "rejected" in llm.calls[1][0]["content"]
     schema = llm.response_formats[0]["json_schema"]["schema"]["properties"]["rankedMovies"]
     assert schema["minItems"] == schema["maxItems"] == 2
     assert schema["items"]["properties"]["movieId"]["enum"] == CANDIDATES

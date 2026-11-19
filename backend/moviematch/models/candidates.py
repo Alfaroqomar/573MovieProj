@@ -33,7 +33,7 @@ from moviematch.data.paths import candidates_dir, model_paths, processed_paths
 from moviematch.data.preprocess import SPLIT_TEST, SPLIT_TRAIN, SPLIT_VALIDATION, build_matrix
 from moviematch.data.preprocess import normalize_tag
 from moviematch.models.als import AlsModel
-from moviematch.models.common import user_row
+from moviematch.models.common import top_k, user_row
 from moviematch.models.item_knn import ItemKnnModel
 from moviematch.models.stage1 import merge_candidates
 
@@ -115,8 +115,10 @@ def export_candidates(settings: Settings, split_name: str = "test", n_users: int
     rows, user_lines = [], []
     for n, u in enumerate(chosen):
         h, r = user_row(history, int(u))
+        als_scores = als.scores_for_vector(als.user_vector(h, r))
+        knn_scores = knn.scores(h, r)
         pool = merge_candidates(
-            als.scores_for_vector(als.user_vector(h, r)), knn.scores(h, r), h,
+            als_scores, knn_scores, h,
             settings.stage1_per_model, settings.stage1_pool_size, settings.stage1_top_up,
         )
         evidence = knn.evidence(h, r, [c.movie_idx for c in pool], per_candidate=2)
@@ -150,6 +152,8 @@ def export_candidates(settings: Settings, split_name: str = "test", n_users: int
         user_lines.append({
             "user_id": int(user_ids[u]),
             "history_size": int(counts[u]),
+            "als_top10": [int(movie_ids[m]) for m in top_k(als_scores, 10, exclude=h)],
+            "knn_top10": [int(movie_ids[m]) for m in top_k(knn_scores, 10, exclude=h)],
             "is_cold_start": is_cold,
             "favorite_genres": favorite_genres_from_history(h, r, genres, settings.high_rating_threshold),
             "highly_rated": [{"movie_id": int(movie_ids[liked[i]]), "title": titles[liked[i]], "rating": float(liked_r[i])} for i in order],

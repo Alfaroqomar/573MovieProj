@@ -162,7 +162,7 @@ export function HomePage() {
             </p>
             <p>
               <span className="text-paper">The LLM</span> receives only those candidates with their MovieLens genres,
-              tags, and scores. It reorders them for your request and explains each pick. The backend rejects any
+              tags, and scores. It reorders them for your request. The app explains picks using the supplied data and rejects any
               response that names a movie outside the candidate list and falls back to the Stage 1 order if needed.
             </p>
           </div>

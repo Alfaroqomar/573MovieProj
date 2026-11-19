@@ -773,7 +773,7 @@ class MovieMatchService:
                         item = stage1_item(by_id[ranked.movieId], ranked.rank)
                         item["llmRelevanceScore"] = round(ranked.llmRelevanceScore, 4)
                         item["explanation"] = ranked.explanation
-                        item["explanationSource"] = "llm"
+                        item["explanationSource"] = "template"
                         recommendations.append(item)
                     response["interpretedRequest"] = result.output.interpretedRequest.model_dump()
                 else:

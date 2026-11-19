@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,19 +12,14 @@ import numpy as np
 import pandas as pd
 
 from moviematch.config import Settings
-from moviematch.data.paths import processed_paths
+from moviematch.data.paths import model_paths, processed_paths
 from moviematch.llm.client import OpenAICompatibleClient
 from moviematch.llm.reranker import rerank
 from moviematch.models.candidates import export_candidates
 from moviematch.models.evaluation import ranking_metrics
 
 
-def _ranked_ids(frame: pd.DataFrame, column: str) -> list[int]:
-    ordered = frame[frame[column].notna()].sort_values(column)
-    return ordered["movie_id"].astype(int).tolist()[:10]
-
-
-def run_validation_pilot(settings: Settings, users: int = 5, log=print) -> Path:
+def run_validation_pilot(settings: Settings, users: int = 5, log=print, *, split: str = "validation") -> Path:
     if not settings.llm.configured:
         raise RuntimeError("Configure an LLM before running the pilot.")
     if settings.split_mode != "date":
@@ -31,7 +27,11 @@ def run_validation_pilot(settings: Settings, users: int = 5, log=print) -> Path:
     if users < 1:
         raise ValueError("users must be at least 1")
 
-    export = export_candidates(settings, split_name="validation", n_users=users, log=log)
+    expected_fit = {"validation": "train", "test": "train+validation"}[split]
+    training = json.loads(model_paths(settings).training_manifest.read_text())["models"]
+    if any(training.get(name, {}).get("fitOn") != expected_fit for name in ("als", "knn")):
+        raise RuntimeError(f"The {split} run requires ALS and Item-KNN fitted on {expected_fit}.")
+    export = export_candidates(settings, split_name=split, n_users=users, log=log)
     frame = pd.read_parquet(export["candidates"])
     profiles = [json.loads(line) for line in Path(export["userFile"]).read_text().splitlines()]
     manifest = json.loads(processed_paths(settings).manifest.read_text())
@@ -46,8 +46,8 @@ def run_validation_pilot(settings: Settings, users: int = 5, log=print) -> Path:
             user_id = profile["user_id"]
             candidates = grouped[user_id]
             stage1 = candidates["movie_id"].astype(int).tolist()
-            als = _ranked_ids(candidates, "als_rank")
-            knn = _ranked_ids(candidates, "knn_rank")
+            als = profile["als_top10"]
+            knn = profile["knn_top10"]
             payload = {
                 "userRequest": "",
                 "userProfile": {
@@ -65,17 +65,19 @@ def run_validation_pilot(settings: Settings, users: int = 5, log=print) -> Path:
                         "title": row.title,
                         "year": None if pd.isna(row.year) else int(row.year),
                         "genres": list(row.genres),
-                        "tags": list(row.tags),
+                        "tags": list(row.tags)[:3],
                         "mergedScore": float(row.merged_score),
                         "stage1Rank": int(row.rank),
                         "alsScore": None if pd.isna(row.als_score) else float(row.als_score),
                         "knnScore": None if pd.isna(row.knn_score) else float(row.knn_score),
-                        "knnEvidence": json.loads(row.knn_evidence),
+                        "knnEvidence": json.loads(row.knn_evidence)[:1],
                     }
                     for row in candidates.itertuples()
                 ],
             }
+            started = time.perf_counter()
             result = rerank(client, payload, 10, genres)
+            elapsed = time.perf_counter() - started
             llm = [movie.movieId for movie in result.output.rankedMovies] if result.output else stage1[:10]
             relevant = set(profile["relevant_movie_ids"])
             user_metrics = {}
@@ -97,6 +99,7 @@ def run_validation_pilot(settings: Settings, users: int = 5, log=print) -> Path:
                         "title": by_id[movie.movieId]["title"],
                         "genres": by_id[movie.movieId]["genres"],
                         "tags": by_id[movie.movieId]["tags"],
+                        "knnEvidence": by_id[movie.movieId]["knnEvidence"],
                         "explanation": movie.explanation,
                     }
                     for movie in result.output.rankedMovies
@@ -108,6 +111,7 @@ def run_validation_pilot(settings: Settings, users: int = 5, log=print) -> Path:
                 "relevantCount": len(relevant),
                 "usedFallback": not result.succeeded,
                 "attempts": result.attempts,
+                "llmSeconds": round(elapsed, 2),
                 "fallbackReason": result.fallback_reason,
                 "validationErrors": result.validation_errors,
                 "metrics": user_metrics,
@@ -118,29 +122,41 @@ def run_validation_pilot(settings: Settings, users: int = 5, log=print) -> Path:
     finally:
         client.close()
 
+    if not records:
+        raise RuntimeError("There are no eligible users to evaluate.")
+    differences = np.subtract(metrics["llm_or_fallback"]["ndcg"], metrics["stage1"]["ndcg"])
+    samples = np.random.default_rng(settings.eval_random_seed).choice(
+        differences, size=(2000, len(differences)), replace=True,
+    )
     report = {
-        "kind": "exploratory_validation_pilot",
-        "status": "small sample; not a final test-set evaluation",
+        "kind": "sampled_llm_evaluation",
         "createdAt": datetime.now(timezone.utc).isoformat(),
-        "split": "validation",
+        "split": split,
+        "sampleSeed": settings.eval_random_seed,
+        "trainedOn": expected_fit,
         "model": settings.llm.model,
         "users": len(records),
         "coldStartUsers": sum(record["coldStart"] for record in records),
         "llmSuccesses": sum(not record["usedFallback"] for record in records),
         "llmFallbacks": sum(record["usedFallback"] for record in records),
+        "medianLlmSeconds": round(float(np.median([record["llmSeconds"] for record in records])), 2),
+        "pairedNdcgAt10VsStage1": {
+            "meanDifference": round(float(differences.mean()), 5),
+            "bootstrap95": np.round(np.quantile(samples.mean(axis=1), [0.025, 0.975]), 5).tolist(),
+        },
         "metricMeans": {
             name: {metric + "@10": round(float(np.mean(values)), 5) for metric, values in scores.items()}
             for name, scores in metrics.items()
         },
         "notes": [
-            "All methods use the same users and held-out validation ratings.",
-            "The LLM receives only pre-validation user ratings and tags available before validation.",
+            "All methods use the same users and held-out ratings.",
+            "The LLM receives only user ratings and tags available before the evaluated period.",
             "The LLM-or-fallback metrics include Stage 1 fallback when an LLM response is invalid.",
-            "This small pilot does not establish statistical superiority or explanation faithfulness.",
+            "Explanations are generated by the app from supplied evidence.",
         ],
         "records": records,
     }
-    output = settings.artifacts_dir / "llm_pilot" / "validation.json"
+    output = settings.artifacts_dir / "llm_pilot" / f"{split}.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, indent=2))
     log(f"Saved exploratory pilot to {output}")
