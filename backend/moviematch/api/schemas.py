@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -100,6 +100,7 @@ class RecommendationResponse(BaseModel):
     fallbackLabel: str | None = None
     fallbackReason: str | None = None
     interpretedRequest: InterpretedRequestOut | None = None
+    requestFilter: dict[str, Any] | None = None
     llm: LlmInfo | None = None
     stageTimingsMs: dict[str, float]
     elapsedMs: float

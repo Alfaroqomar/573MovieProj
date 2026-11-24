@@ -59,6 +59,12 @@ class OpenAICompatibleClient:
             body["response_format"] = {"type": "json_object"}
         try:
             response = self._client.post(self._url, json=body)
+            if response.status_code == 400 and "response_format" in body and "context length" not in response.text:
+                # Some providers reject response_format; the prompt already asks for
+                # bare JSON and the validator checks it, so retry once without it.
+                logger.warning("LLM rejected response_format (HTTP 400); retrying without it")
+                body.pop("response_format")
+                response = self._client.post(self._url, json=body)
         except httpx.TimeoutException:
             logger.warning("LLM request timed out after %ss", self._settings.timeout_seconds)
             raise LlmError(

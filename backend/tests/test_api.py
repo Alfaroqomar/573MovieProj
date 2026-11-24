@@ -104,11 +104,12 @@ def test_als_llm_reranks_only_candidates(prepared):
     with client_for(with_llm(prepared), llm) as client:
         stage1 = client.post("/api/recommendations/stage1", json={"userId": 5, "topN": 50}).json()
         stage1_ids = [r["movie"]["movieId"] for r in stage1["recommendations"]]
-        r = client.post("/api/recommendations/als-llm", json={"userId": 5, "topN": 10, "userRequest": "quiet sci-fi"})
+        r = client.post("/api/recommendations/als-llm", json={"userId": 5, "topN": 10, "userRequest": "something quiet"})
         assert r.status_code == 200
         data = r.json()
     sent = candidate_ids_from(llm.calls[0])
-    assert sent == stage1_ids
+    assert sent == stage1_ids  # no genre in the request, so the shortlist is plain Stage 1
+    assert "requestFilter" not in data or data["requestFilter"] is None
     payload = json.loads(llm.calls[0][1]["content"])
     assert all("mergedScore" in c and "stage1Rank" in c for c in payload["candidates"])
     assert "secret-key" not in json.dumps(llm.calls[0])
@@ -118,6 +119,22 @@ def test_als_llm_reranks_only_candidates(prepared):
     assert recs[0]["stage1Rank"] == 50 and recs[0]["finalRank"] == 1
     assert all(r["explanationSource"] == "template" and r["llmRelevanceScore"] is not None for r in recs)
     assert data["interpretedRequest"]["preferredGenres"] == ["Sci-Fi"]
+
+
+def test_als_llm_request_genre_filters_the_shortlist(prepared):
+    llm = FakeLlm([valid_response_for(10)])
+    with client_for(with_llm(prepared), llm) as client:
+        r = client.post("/api/recommendations/als-llm", json={"userId": 5, "topN": 10, "userRequest": "quiet sci-fi"})
+        assert r.status_code == 200
+        data = r.json()
+        summary = client.get("/api/users/5/summary").json()
+    payload = json.loads(llm.calls[0][1]["content"])
+    assert payload["candidates"], "the request should still leave candidates"
+    assert all("Sci-Fi" in c["genres"] for c in payload["candidates"])
+    assert data["requestFilter"]["genres"] == ["Sci-Fi"]
+    assert data["usedFallback"] is False
+    rated = {m["movieId"] for m in summary["highlyRatedMovies"]}
+    assert not rated & {c["movieId"] for c in payload["candidates"]}
 
 
 def test_als_llm_falls_back_transparently(prepared):

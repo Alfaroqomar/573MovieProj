@@ -29,6 +29,7 @@ from moviematch.data.paths import (
 from moviematch.data.raw import check_raw_dataset
 from moviematch.llm.client import OpenAICompatibleClient
 from moviematch.llm.reranker import FALLBACK_LABEL, ChatClient, RerankResult, rerank_steps
+from moviematch.llm.request_genres import infer_request_genres
 from moviematch.models.als import AlsCandidate, AlsModel
 from moviematch.models.als_explicit import ExplicitAlsModel
 from moviematch.models.common import min_max, top_k, user_row
@@ -337,6 +338,10 @@ class MovieMatchService:
         self.movie_titles = movies["title"].astype(str).tolist()
         self.movie_years = [None if pd.isna(y) else int(y) for y in movies["year"]]
         self.movie_genres = [g.split("|") if g else [] for g in movies["genres"].astype(str)]
+        self.genre_masks = {
+            genre: np.fromiter((genre in genres for genres in self.movie_genres), dtype=bool, count=len(self.movie_genres))
+            for genre in self.genre_vocabulary
+        }
         self.movie_imdb = [None if pd.isna(v) else str(v) for v in movies["imdbId"]]
         self.movie_tmdb = [None if pd.isna(v) else int(v) for v in movies["tmdbId"]]
         self.movie_rating_count = movies["rating_count"].to_numpy()
@@ -707,6 +712,13 @@ class MovieMatchService:
             knn_scores = self.knn.scores(history, history_ratings)
             timings["itemKnn"] = (time.perf_counter() - t0) * 1000
             yield stage("finding_similar", "done")
+            if mode == "als_llm":
+                als_scores, knn_scores, request_filter = self._apply_request_filter(
+                    als_scores, knn_scores, history, user_request,
+                    min(candidate_count, self.settings.stage1_pool_size),
+                )
+                if request_filter:
+                    response["requestFilter"] = request_filter
             yield stage("merging_candidates", "started")
             t0 = time.perf_counter()
             pool1: list[Stage1Candidate] = merge_candidates(
@@ -881,6 +893,41 @@ class MovieMatchService:
                 result = event["data"]
         assert result is not None
         return result
+
+    def _apply_request_filter(
+        self,
+        als_scores: np.ndarray,
+        knn_scores: np.ndarray,
+        history: np.ndarray,
+        user_request: str,
+        pool_size: int,
+    ) -> tuple[np.ndarray, np.ndarray, dict[str, Any] | None]:
+        """Draw the shortlist from movies that fit the request's genres.
+
+        Stage 1 scores come from the rating history alone, so without this a
+        request like "romantic" can only reorder movies ALS already picked.
+        Movies outside the requested genres get -inf, so they cannot enter the
+        pool; everything else (ALS/KNN scores, exclusion of rated movies) is
+        unchanged. If the request names several genres, movies matching all of
+        them are used when there are enough, otherwise any of them.
+        """
+        genres = infer_request_genres(user_request, self.genre_vocabulary)
+        if not genres:
+            return als_scores, knn_scores, None
+        unseen = np.ones(self.n_movies, dtype=bool)
+        unseen[history] = False
+        has_all = np.logical_and.reduce([self.genre_masks[g] for g in genres])
+        has_any = np.logical_or.reduce([self.genre_masks[g] for g in genres])
+        match_all = len(genres) == 1 or int((has_all & unseen & np.isfinite(als_scores)).sum()) >= pool_size
+        keep = has_all if match_all else has_any
+        filtered_als = np.where(keep, als_scores, -np.inf)
+        filtered_knn = np.where(keep, knn_scores, -np.inf)
+        info = {
+            "genres": genres,
+            "match": "all" if match_all else "any",
+            "eligibleMovies": int((keep & unseen).sum()),
+        }
+        return filtered_als, filtered_knn, info
 
     def _llm_payload(
         self,
