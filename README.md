@@ -1,11 +1,11 @@
 
 
 # MovieMatch
-CODE: frontend & backend
+**CODE**: frontend & backend
 
-DATA: https://grouplens.org/datasets/movielens/32m/
+**DATA**: https://grouplens.org/datasets/movielens/32m/
 
-EVALUATIONS: backend/tests/
+**EVALUATIONS**: backend/tests/
 
 Classical movie recommendations on **MovieLens 32M**, enhanced by LLM reranking and grounded explanations.
 
